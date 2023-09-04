@@ -68,17 +68,23 @@ pub type ProbResult<T> = Result<T, ProbError>;
 ///
 /// The only ways to instantiate a `Probability` require that this condition be
 /// satisfied; thus it is guaranteed to hold for any such object.
-#[derive(Clone, Copy, PartialEq, PartialOrd, Debug)]
+#[derive(Clone, Copy, PartialEq, Debug)]
 pub struct Probability {
     p: f64
 }
 
 impl Eq for Probability { }
 
+impl PartialOrd for Probability {
+    fn partial_cmp(&self, other: &Self) -> Option<std::cmp::Ordering> {
+        return self.p().partial_cmp(&other.p());
+    }
+}
+
 impl Ord for Probability {
     fn cmp(&self, other: &Self) -> std::cmp::Ordering {
         // this is safe due to construction constraints
-        return self.p().partial_cmp(&other.p()).unwrap();
+        return self.p().total_cmp(&other.p());
     }
 }
 
@@ -219,10 +225,10 @@ pub trait RandomDiscrete {
     }
 
     /// Sample values from the distribution until some condition is met.
-    fn sample_until<F>(&self, mut cond: F) -> Vec<Self::Var>
+    fn sample_until<F>(&self, cond: F) -> Vec<Self::Var>
     where F: FnMut(Self::Var) -> Option<Self::Var>
     {
-        return self.sampler().map_while(|v| cond(v)).collect();
+        return self.sampler().map_while(cond).collect();
     }
 }
 
@@ -427,10 +433,10 @@ pub trait RandomContinuous {
     }
 
     /// Sample values from the distribution until some condition is met.
-    fn sample_until<F>(&self, mut cond: F) -> Vec<Self::Var>
+    fn sample_until<F>(&self, cond: F) -> Vec<Self::Var>
     where F: FnMut(Self::Var) -> Option<Self::Var>
     {
-        return self.sampler().map_while(|v| cond(v)).collect();
+        return self.sampler().map_while(cond).collect();
     }
 }
 

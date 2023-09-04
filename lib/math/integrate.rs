@@ -42,9 +42,9 @@ where
 {
     let n: usize = y.len();
     return (
-        y[0].clone() * (dx.clone() * 0.5)
-        + y.slice(s![1..n - 1]).sum() * dx.clone()
-        + y[n - 1].clone() * (dx.clone() * 0.5)
+        y[0].clone() * (*dx * 0.5)
+        + y.slice(s![1..n - 1]).sum() * *dx
+        + y[n - 1].clone() * (*dx * 0.5)
     );
 }
 
@@ -57,7 +57,7 @@ where
     let n: usize = y.len();
     let dx: Vec<X>
         = x.iter().take(n - 1).zip(x.iter().skip(1))
-        .map(|(xk, xkp1)| xkp1.clone() - xk.clone())
+        .map(|(xk, xkp1)| *xkp1 - *xk)
         .collect();
     let mut acc = A::zero();
     y.iter().take(n - 1).zip(y.iter().skip(1)).zip(dx.into_iter())
@@ -79,12 +79,12 @@ where
     let n: usize = y.shape()[axis];
     return
         y.index_axis(nd::Axis(axis), 0)
-            .mapv(|yk| yk * (dx.clone() * 0.5))
+            .mapv(|yk| yk * (*dx * 0.5))
         + y.slice_axis(nd::Axis(axis), nd::Slice::from(1..n - 1))
             .sum_axis(nd::Axis(axis))
-            .mapv(|yk| yk * dx.clone())
+            .mapv(|yk| yk * *dx)
         + y.index_axis(nd::Axis(axis), n - 1)
-            .mapv(|yk| yk * (dx.clone() * 0.5))
+            .mapv(|yk| yk * (*dx * 0.5))
     ;
 }
 
@@ -104,7 +104,7 @@ where
     let ndaxis = nd::Axis(axis);
     let dx: Vec<X>
         = x.iter().take(n - 1).zip(x.iter().skip(1))
-        .map(|(xk, xkp1)| xkp1.clone() - xk.clone())
+        .map(|(xk, xkp1)| *xkp1 - *xk)
         .collect();
     let mut acc: nd::Array<A, <D as nd::Dimension>::Smaller>
         = nd::Array::zeros(y.raw_dim().remove_axis(ndaxis));
@@ -112,8 +112,8 @@ where
         .zip(dx.into_iter())
         .for_each(|((yk, ykp1), dxk)| {
             acc += &(
-                yk.mapv(|ykj| ykj * (dxk.clone() * 0.5))
-                + ykp1.mapv(|ykp1j| ykp1j * (dxk.clone() * 0.5))
+                yk.mapv(|ykj| ykj * (dxk * 0.5))
+                + ykp1.mapv(|ykp1j| ykp1j * (dxk * 0.5))
             )
         });
     return acc;
@@ -127,10 +127,10 @@ where
 {
     let n: usize = y.len();
     return (
-        y[0].clone() * (dx.clone() * (1.0 / 3.0))
-        + y.slice(s![1..n - 1;2]).sum() * (dx.clone() * (4.0 / 3.0))
-        + y.slice(s![2..n - 1;2]).sum() * (dx.clone() * (2.0 / 3.0))
-        + y[n - 1].clone() * (dx.clone() * (1.0 / 3.0))
+        y[0].clone() * (*dx * (1.0 / 3.0))
+        + y.slice(s![1..n - 1;2]).sum() * (*dx * (4.0 / 3.0))
+        + y.slice(s![2..n - 1;2]).sum() * (*dx * (2.0 / 3.0))
+        + y[n - 1].clone() * (*dx * (1.0 / 3.0))
     );
 }
 
@@ -146,15 +146,15 @@ where
     let n: usize = y.shape()[axis];
     return
         y.index_axis(nd::Axis(axis), 0)
-            .mapv(|yk| yk * (dx.clone() * (1.0 / 3.0)))
+            .mapv(|yk| yk * (*dx * (1.0 / 3.0)))
         + y.slice_axis(nd::Axis(axis), nd::Slice::from(1..n - 1).step_by(2))
             .sum_axis(nd::Axis(axis))
-            .mapv(|yk| yk * (dx.clone() * (4.0 / 3.0)))
+            .mapv(|yk| yk * (*dx * (4.0 / 3.0)))
         + y.slice_axis(nd::Axis(axis), nd::Slice::from(2..n - 1).step_by(2))
             .sum_axis(nd::Axis(axis))
-            .mapv(|yk| yk * (dx.clone() * (2.0 / 3.0)))
+            .mapv(|yk| yk * (*dx * (2.0 / 3.0)))
         + y.index_axis(nd::Axis(axis), n - 1)
-            .mapv(|yk| yk * (dx.clone() * (1.0 / 3.0)))
+            .mapv(|yk| yk * (*dx * (1.0 / 3.0)))
     ;
 }
 
@@ -204,7 +204,7 @@ where
     let i: nd::Array1<A>
         = y.iter().take(n - 1).zip(y.iter().skip(1))
         .map(|(ykm1, yk)| {
-            acc += (ykm1.clone() + yk.clone()) * (dx.clone() * 0.5);
+            acc += (ykm1.clone() + yk.clone()) * (*dx * 0.5);
             acc.clone()
         })
         .collect();
@@ -222,7 +222,7 @@ where
     let n: usize = y.len();
     let dx: Vec<X>
         = x.iter().take(n - 1).zip(x.iter().skip(1))
-        .map(|(xk, xkp1)| xkp1.clone() - xk.clone())
+        .map(|(xk, xkp1)| *xkp1 - *xk)
         .collect();
     let mut I: nd::Array1<A> = nd::Array::zeros(n);
     let mut acc = A::zero();
@@ -258,7 +258,7 @@ where
         .map(|(ykm1, yk)| {
             acc.iter_mut().zip(ykm1.iter().zip(yk.iter()))
                 .for_each(|(accj, (ykm1j, ykj))| {
-                    *accj += (ykm1j.clone() + ykj.clone()) * (dx.clone() * 0.5);
+                    *accj += (ykm1j.clone() + ykj.clone()) * (*dx * 0.5);
                 });
             acc.clone()
         })
@@ -295,7 +295,7 @@ where
     let ndaxis = nd::Axis(axis);
     let dx: Vec<X>
         = x.iter().take(n - 1).zip(x.iter().skip(1))
-        .map(|(xk, xkp1)| xkp1.clone() - xk.clone())
+        .map(|(xk, xkp1)| *xkp1 - *xk)
         .collect();
     let mut I: nd::Array<A, D> = nd::Array::zeros(y.raw_dim());
     let mut acc: nd::Array<A, <D as nd::Dimension>::Smaller>
@@ -308,7 +308,7 @@ where
                 .for_each(|(accj, (ykm1j, ykj))| {
                     *accj += (
                         ykm1j.clone() + ykj.clone()
-                    ) * (dxkm1.clone() * 0.5);
+                    ) * (dxkm1 * 0.5);
                 });
             acc.clone()
         })
@@ -343,8 +343,8 @@ where
         = y.iter().take(n - 1).zip(y.iter().skip(1)).enumerate()
         .map(|(km1, (ykm1, yk))| {
             acc += (
-                ykm1.clone() * (dx.clone() * simps_factor(km1))
-                + yk.clone() * (dx.clone() * (1.0 / 3.0))
+                ykm1.clone() * (*dx * simps_factor(km1))
+                + yk.clone() * (*dx * (1.0 / 3.0))
             );
             acc.clone()
         })
@@ -376,8 +376,8 @@ where
             acc.iter_mut().zip(ykm1.iter().zip(yk.iter()))
                 .for_each(|(accj, (ykm1j, ykj))| {
                     *accj += (
-                        ykm1j.clone() * (dx.clone() * simps_factor(km1))
-                        + ykj.clone() * (dx.clone() * (1.0 / 3.0))
+                        ykm1j.clone() * (*dx * simps_factor(km1))
+                        + ykj.clone() * (*dx * (1.0 / 3.0))
                     );
                 });
             acc.clone()

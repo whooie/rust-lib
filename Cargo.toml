@@ -4,6 +4,12 @@ version = "0.1.0"
 authors = [ "whooie <wcwhuie@gmail.com>",]
 edition = "2021"
 
+# [build]
+# rustdocflags = "--html-in-header rustdoc-latex.html"
+#
+# [package.metadata.docs.rs]
+# rustdoc-args = [ "--html-in-header", "rustdoc-katex.html",]
+
 [dev-dependencies]
 ndarray = "0.15.6"
 
@@ -74,6 +80,7 @@ math = [
     "dep:rustfft",
     "dep:ndrustfft",
 ]
+zx = [ "dep:ndarray", "dep:num-complex",]
 all = [
     "nd",
     "ndarray-utils",
@@ -81,6 +88,7 @@ all = [
     "plotting-plotly",
     "pyo3-utils",
     "math",
+    "zx",
 ]
 
 [profile.release]

@@ -88,16 +88,24 @@ macro_rules! mkdir {
 /// succinct syntax.
 #[macro_export]
 macro_rules! c {
+    ( $re:expr )
+        => { num_complex::Complex64::new($re, 0.0) };
+    ( i $im:expr )
+        => { num_complex::Complex64::new(0.0, $im) };
+    ( e $ph:expr )
+        => { num_complex::Complex64::cis($ph) };
+    ( $re:literal + i $im:literal )
+        => { num_complex::Complex64::new($re, $im) };
+    ( $re:literal - i $im:literal )
+        => { num_complex::Complex64::new($re, -$im) };
     ( $re:literal + $im:literal i )
         => { num_complex::Complex64::new($re, $im) };
     ( $re:literal - $im:literal i )
         => { num_complex::Complex64::new($re, -$im) };
-    ( $re:literal )
-        => { num_complex::Complex64::new($re, 0.0) };
-    ( $im:literal i )
-        => { num_complex::Complex64::new(0.0, $im) };
     ( $re:expr, $im:expr )
         => { num_complex::Complex64::new($re, $im) };
+    ( $r:expr, e $ph:expr )
+        => { num_complex::Complex64::from_polar($r, $ph) };
 }
 
 /// Handles repeated calls with varied inputs to a closure outputting some

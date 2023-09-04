@@ -30,3 +30,6 @@ pub mod pyo3_utils;
 #[cfg(feature = "math")]
 pub mod math;
 
+#[cfg(feature = "zx")]
+pub mod zx;
+

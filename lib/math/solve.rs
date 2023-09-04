@@ -306,7 +306,7 @@ where
     V: Add<V, Output = V> + Mul<f64, Output = V> + Copy,
     ND: nd::Dimension,
 {
-    let zshape: Vec<usize> = z0.shape().iter().map(|d| *d).collect();
+    let zshape: Vec<usize> = z0.shape().to_vec();
     let NX: usize = x.len();
     let dx: nd::Array1<U>
         = x.iter().skip(1)
@@ -566,6 +566,7 @@ where
 
 /// Driver for full RK4 integration of a ND -> ND governing equation using
 /// adaptive step sizes controlled by a step-doubling strategy.
+#[allow(clippy::type_complexity)]
 pub fn rka_nd<F, U, V, ND>(
     z0: nd::Array<V, ND>,
     rhs: F,
@@ -586,7 +587,7 @@ where
     nd::Array<V, ND>: ErrorRatio,
     ND: nd::Dimension,
 {
-    let zshape: Vec<usize> = z0.shape().iter().map(|d| *d).collect();
+    let zshape: Vec<usize> = z0.shape().to_vec();
     let mut x: Vec<U> = Vec::new();
     x.push(x_bounds.0);
     let mut x_prev: U = x_bounds.0;
