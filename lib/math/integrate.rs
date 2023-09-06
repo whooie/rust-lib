@@ -120,6 +120,9 @@ where
 }
 
 /// Apply Simpson's rule to a 1D array sampled at even intervals.
+///
+/// For optimal performance, this function should use an odd number of grid
+/// points.
 pub fn simpson<A, X>(y: &nd::Array1<A>, dx: &X) -> A
 where
     A: Clone + Add<Output = A> + Mul<X, Output = A> + Zero,
@@ -134,8 +137,11 @@ where
     );
 }
 
-/// Apply Simpson's rule along a single axis of a N-dimensional array ith even
+/// Apply Simpson's rule along a single axis of a N-dimensional array with even
 /// sampling intervals.
+///
+/// For optimal performance, this function should use an odd number of grid
+/// points.
 pub fn simpson_axis<A, D, X>(y: &nd::Array<A, D>, dx: &X, axis: usize)
     -> nd::Array<A, <D as nd::Dimension>::Smaller>
 where
@@ -158,26 +164,84 @@ where
     ;
 }
 
-/// Apply either trapezoidal or Simpson's rule, depending on the number of
+/// Apply Boole's rule to a 1D array sampled at even intervals.
+///
+/// For optimal performace, the number of grid points should be one more than a
+/// multiple of four.
+pub fn boole<A, X>(y: &nd::Array1<A>, dx: &X) -> A
+where
+    A: Clone + Add<Output = A> + Mul<X, Output = A> + Zero,
+    X: Float + Mul<f64, Output = X>,
+{
+    let n: usize = y.len();
+    return (
+        y[0].clone() * (*dx * (14.0 / 45.0))
+        + y.slice(s![1..n - 1;4]).sum() * (*dx * (64.0 / 45.0))
+        + y.slice(s![2..n - 1;4]).sum() * (*dx * (8.0 / 15.0))
+        + y.slice(s![3..n - 1;4]).sum() * (*dx * (64.0 / 45.0))
+        + y.slice(s![4..n - 1;4]).sum() * (*dx * (28.0 / 45.0))
+        + y[n - 1].clone() * (*dx * (14.0 / 45.0))
+    );
+}
+
+/// Apply Boole's rule along a single axis of a N-dimensional array with even
+/// sampling intervals.
+///
+/// For optimal perfornace, the number of grid points should be one more than a
+/// multiple of four.
+pub fn boole_axis<A, D, X>(y: &nd::Array<A, D>, dx: &X, axis: usize)
+    -> nd::Array<A, <D as nd::Dimension>::Smaller>
+where
+    A: Clone + Add<Output = A> + Mul<X, Output = A> + Zero,
+    X: Float + Mul<f64, Output = X>,
+    D: nd::RemoveAxis,
+{
+    let n: usize = y.shape()[axis];
+    return
+        y.index_axis(nd::Axis(axis), 0)
+            .mapv(|yk| yk * (*dx * (14.0 / 45.0)))
+        + y.slice_axis(nd::Axis(axis), nd::Slice::from(1..n - 1).step_by(4))
+            .sum_axis(nd::Axis(axis))
+            .mapv(|yk| yk * (*dx * (64.0 / 45.0)))
+        + y.slice_axis(nd::Axis(axis), nd::Slice::from(2..n - 1).step_by(4))
+            .sum_axis(nd::Axis(axis))
+            .mapv(|yk| yk * (*dx * (8.0 / 15.0)))
+        + y.slice_axis(nd::Axis(axis), nd::Slice::from(3..n - 1).step_by(4))
+            .sum_axis(nd::Axis(axis))
+            .mapv(|yk| yk * (*dx * (64.0 / 45.0)))
+        + y.slice_axis(nd::Axis(axis), nd::Slice::from(4..n - 1).step_by(4))
+            .sum_axis(nd::Axis(axis))
+            .mapv(|yk| yk * (*dx * (28.0 / 45.0)))
+        + y.index_axis(nd::Axis(axis), n - 1)
+            .mapv(|yk| yk * (*dx * (14.0 / 45.0)))
+    ;
+}
+
+/// Apply trapezoidal, Simpson's, or Boole's rule, depending on the number of
 /// points $`n`$ sampled in the array.
 ///
-/// For even $`n`$ use trapezoidal; for odd $`n`$ use Simpson's.
+/// For `n ≡ 1 mod 4`, use Boole's; otherwise for even $`n`$ use trapezoidal and
+/// for odd $`n`$ use Simpson's.
 pub fn integrate<A, X>(y: &nd::Array1<A>, dx: &X) -> A
 where
     A: Clone + Add<Output = A> + Mul<X, Output = A> + Zero,
     X: Float + Mul<f64, Output = X>,
 {
-    return if y.len() % 2 == 1 {
+    let n: usize = y.len();
+    return if n % 4 == 1 {
+        boole(y, dx)
+    } else if n % 2 == 1 {
         simpson(y, dx)
     } else {
         trapz(y, dx)
     };
 }
 
-/// Apply either trapezoidal or Simpson's rule to a single axis, depending on
+/// Apply trapezoidal, Simpson's, or Boole's rule to a single axis, depending on
 /// the size $`n`$ of the axis.
 ///
-/// For even $`n`$ use trapezoidal; for odd $`n`$ use Simpson's.
+/// For `n ≡ 1 mod 4`, use Boole's; otherwise for even $`n`$ use trapezoidal and
+/// for odd $`n`$ use Simpson's.
 pub fn integrate_axis<A, D, X>(y: &nd::Array<A, D>, dx: &X, axis: usize)
     -> nd::Array<A, <D as nd::Dimension>::Smaller>
 where
@@ -185,7 +249,10 @@ where
     X: Float + Mul<f64, Output = X>,
     D: nd::RemoveAxis,
 {
-    return if y.len() % 2 == 1 {
+    let n: usize = y.shape()[axis];
+    return if n % 4 == 1 {
+        boole_axis(y, dx, axis)
+    } else if n % 2 == 1 {
         simpson_axis(y, dx, axis)
     } else {
         trapz_axis(y, dx, axis)
@@ -331,6 +398,9 @@ fn simps_factor(km1: usize) -> f64 {
 }
 
 /// Compute the progressive integral via Simpson's rule.
+///
+/// For optimal performance, this function should use an odd number of grid
+/// points.
 pub fn simpson_prog<A, X>(y: &nd::Array1<A>, dx: &X) -> nd::Array1<A>
 where
     A: Clone + Add<Output = A> + AddAssign<A> + Mul<X, Output = A> + Zero,
@@ -354,6 +424,9 @@ where
 }
 
 /// Compute the progressive integral along a single axis via Simpson's rule.
+///
+/// For optimal performance, this function should use an odd number of grid
+/// points.
 ///
 /// **Warning: this routine is *very* expensive to run!**
 pub fn simpson_prog_axis<A, D, X>(y: &nd::Array<A, D>, dx: &X, axis: usize)

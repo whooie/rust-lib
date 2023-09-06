@@ -211,7 +211,7 @@ where S: Data<Elem=T>,
     {
         return match self {
             NDBase::S(s) => NDBase::<U, OwnedRepr<U>, D>::from(f(s.clone())),
-            NDBase::A(a) => NDBase::<U, OwnedRepr<U>, D>::from(a.mapv(f)),
+            NDBase::A(a) => NDBase::<U, OwnedRepr<U>, D>::A(a.mapv(f)),
         };
     }
 
