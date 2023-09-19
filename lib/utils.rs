@@ -1323,13 +1323,16 @@ impl From<num_traits::ParseFloatError> for ExpValError {
 impl Num for ExpVal {
     type FromStrRadixErr = ExpValError;
 
-    #[allow(unused_variables, unreachable_code)]
     fn from_str_radix(s: &str, radix: u32) -> ExpValResult<Self> {
-        // `s` will be converted to lower case before matching
         const ALPHABET: &str = "0123456789abcdefghijklmnopqrstuvwxyz";
         const SIGN: &str = r"[+\-]";
         const NON_NORMAL: &str = r"nan|inf";
         const BASE10_EXP: &str = r"e([+\-]?\d+)";
+        (2..=36_u32).contains(&radix).then_some(())
+            .ok_or(
+                ExpValError::ParseFloatError(
+                    "radix must be between 2 and 36".to_string())
+            )?;
         let digit: String = format!("[{}]", &ALPHABET[..radix as usize]);
         let number: String
             = format!(r"{nn}|(({d}*\.)?{d}+)", nn=NON_NORMAL, d=digit);
@@ -1408,9 +1411,9 @@ impl Num for ExpVal {
                     r"^([$])?({t}|{p})([$])?$",
                     t=trunc, p=pm,
                 );
-                //    ^ 
+                //    ^
                 //  1 ([$])?
-                //  2 ( 
+                //  2 (
                 //  3     (
                 //  4         ([+\-]?)
                 //  5         (nan|inf|(([0123456789abcdef]*\.)?[0123456789abcdef]+))
@@ -1418,7 +1421,7 @@ impl Num for ExpVal {
                 //        \(
                 //  8     (nan|inf|[0123456789abcdef]+)
                 //        \)
-                //    | 
+                //    |
                 //  9     (
                 // 10         ([+\-]?)
                 // 11         (nan|inf|(([0123456789abcdef]*\.)?[0123456789abcdef]+))
@@ -1427,9 +1430,9 @@ impl Num for ExpVal {
                 // 14     (\+[/]?-|\\pm)
                 //        [ ]*
                 // 15     (nan|inf|(([0123456789abcdef]*\.)?[0123456789abcdef]+))
-                //    ) 
+                //    )
                 // 18 ([$])?
-                //    $ 
+                //    $
                 let pat = Regex::new(&rgx).unwrap();
                 if let Some(cap) = pat.captures(&s.to_lowercase()) {
                     if cap.get(1).is_some() ^ cap.get(18).is_some() {
