@@ -394,7 +394,7 @@ impl KetBra {
         // check for duplicate kets in result
         let mut wire_counts: HashMap<usize, isize>
             = self.ket.keys().map(|idx| (*idx, 1)).collect();
-        rhs.bra.keys()
+        self.bra.keys()
             .for_each(|idx| {
                 wire_counts.entry(*idx)
                     .and_modify(|count| *count -= 1)
@@ -407,7 +407,7 @@ impl KetBra {
                     .or_insert(1);
             });
         if let Some((idx, _))
-            = wire_counts.iter().find(|(_idx, count)| count > &&1)
+            = wire_counts.iter().find(|(_idx, count)| **count > 1)
         {
             return Err(ZXError::DotDuplicateKetKey(*idx));
         }
@@ -801,6 +801,44 @@ impl Element {
         return Self { terms };
     }
 
+    /// Create a swap.
+    ///
+    /// ```math
+    /// \text{SWAP}([i_0, i_1])
+    ///     = \ket{0_{i_0} 0_{i_1}} \bra{0_{i_0} 0_{i_1}}
+    ///     + \ket{1_{i_0} 0_{i_1}} \bra{0_{i_0} 1_{i_1}}
+    ///     + \ket{0_{i_0} 1_{i_1}} \bra{1_{i_0} 0_{i_1}}
+    ///     + \ket{1_{i_0} 1_{i_1}} \bra{1_{i_0} 1_{i_1}}
+    /// ```
+    pub fn swap(wires: [usize; 2]) -> Self {
+        let i0: usize = wires[0];
+        let i1: usize = wires[1];
+        let terms: Vec<KetBra>
+            = vec![
+                KetBra::new(
+                    c!(1.0),
+                    [(i0, Zero), (i1, Zero)],
+                    [(i0, Zero), (i1, Zero)],
+                ),
+                KetBra::new(
+                    c!(1.0),
+                    [(i0, One ), (i1, Zero)],
+                    [(i0, Zero), (i1, One )],
+                ),
+                KetBra::new(
+                    c!(1.0),
+                    [(i0, Zero), (i1, One )],
+                    [(i0, One ), (i1, Zero)],
+                ),
+                KetBra::new(
+                    c!(1.0),
+                    [(i0, One ), (i1, One )],
+                    [(i0, One ), (i1, One )],
+                ),
+            ];
+        return Self { terms };
+    }
+
     /// Create a cup (Bell state).
     ///
     /// ```math
@@ -973,7 +1011,13 @@ impl Element {
 impl fmt::Display for Element {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         let mut terms: Vec<&KetBra> = self.terms.iter().collect();
-        terms.sort_by(|l, r| l.bra.state_ord(&r.bra));
+        let sort_by_bra: bool
+            = terms.iter().all(|kb| !kb.bra.is_empty());
+        if sort_by_bra {
+            terms.sort_by(|l, r| l.bra.state_ord(&r.bra));
+        } else {
+            terms.sort_by(|l, r| l.ket.state_ord(&r.ket));
+        }
         let n: usize = terms.len();
         for (k, term) in terms.iter().enumerate() {
             term.fmt(f)?;
