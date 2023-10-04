@@ -15,21 +15,16 @@ ndarray = "0.15.6"
 
 [dependencies]
 itertools = "0.10.5"
+ndarray = "0.15.6"
+num-complex = "0.4.2"
 num-traits = "0.2.15"
 regex = "1.9.1"
 serde = "1.0.164"
 thiserror = "1.0.40"
-
-[dependencies.toml]
-version = "0.7.5"
-features = [ "display",]
+toml = { version = "0.7.5", features = [ "display",] }
 
 [dependencies.rand]
 version = "0.8.5"
-optional = true
-
-[dependencies.num-complex]
-version = "0.4.2"
 optional = true
 
 [dependencies.rustfft]
@@ -38,10 +33,6 @@ optional = true
 
 [dependencies.ndrustfft]
 version = "0.3.0"
-optional = true
-
-[dependencies.ndarray]
-version = "0.15.6"
 optional = true
 
 [dependencies.ndarray-linalg]
@@ -67,20 +58,13 @@ name = "whooie"
 path = "lib/lib.rs"
 
 [features]
-nd = [ "dep:ndarray",]
-ndarray-utils = [ "dep:ndarray",]
+nd = [ ]
+ndarray-utils = [ ]
 plotting = [ "dep:plotters",]
 plotting-plotly = [ "dep:plotly",]
 pyo3-utils = [ "dep:pyo3",]
-math = [
-    "dep:rand",
-    "dep:num-complex",
-    "dep:ndarray",
-    "dep:ndarray-linalg",
-    "dep:rustfft",
-    "dep:ndrustfft",
-]
-zx = [ "dep:ndarray", "dep:num-complex",]
+math = [ "dep:rand", "dep:ndarray-linalg", "dep:rustfft", "dep:ndrustfft",]
+zx = [ ]
 all = [
     "nd",
     "ndarray-utils",

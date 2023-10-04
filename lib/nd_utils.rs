@@ -11,6 +11,8 @@ use crate::{
     },
 };
 
+pub extern crate ndarray_npy;
+
 /// Write arrays to a `.npz` file.
 ///
 /// Expects the file location as an `impl AsRef<Path> + Clone`, with keys as
@@ -24,7 +26,7 @@ macro_rules! write_npz {
         {
             let mut _output_filepath_ = $filepath.clone();
             let mut _output_writer_
-                = ndarray_npy::NpzWriter::new(
+                = $crate::nd_utils::ndarray_npy::NpzWriter::new(
                     std::fs::File::create(_output_filepath_.clone())
                         .expect(
                             format!(
@@ -61,7 +63,7 @@ macro_rules! write_npz_compressed {
         {
             let mut _output_filepath_ = $filepath.clone();
             let mut _output_writer_
-                = ndarray_npy::NpzWriter::new_compressed(
+                = $crate::nd_utils::ndarray_npy::NpzWriter::new_compressed(
                     std::fs::File::create(_output_filepath_.clone())
                         .expect(
                             format!(
@@ -95,7 +97,7 @@ macro_rules! read_npz {
     ( $filepath:expr ) => {
         {
             let _input_filepath_ = $filepath.clone();
-            ndarray_npy::NpzReader::new(
+            $crate::nd_utils::ndarray_npy::NpzReader::new(
                     std::fs::File::open(_input_filepath_)
                         .expect(
                             format!(

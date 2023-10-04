@@ -84,29 +84,34 @@ macro_rules! mkdir {
     }
 }
 
+pub extern crate num_complex;
+
 /// Handy macro to create `num_complex::Complex64`s from more natural and
 /// succinct syntax.
 #[macro_export]
 macro_rules! c {
     ( $re:expr )
-        => { num_complex::Complex64::new($re, 0.0) };
+        => { $crate::utils::num_complex::Complex64::new($re, 0.0) };
     ( i $im:expr )
-        => { num_complex::Complex64::new(0.0, $im) };
+        => { $crate::utils::num_complex::Complex64::new(0.0, $im) };
     ( e $ph:expr )
-        => { num_complex::Complex64::cis($ph) };
+        => { $crate::utils::num_complex::Complex64::cis($ph) };
     ( $re:literal + i $im:literal )
-        => { num_complex::Complex64::new($re, $im) };
+        => { $crate::utils::num_complex::Complex64::new($re, $im) };
     ( $re:literal - i $im:literal )
-        => { num_complex::Complex64::new($re, -$im) };
+        => { $crate::utils::num_complex::Complex64::new($re, -$im) };
     ( $re:literal + $im:literal i )
-        => { num_complex::Complex64::new($re, $im) };
+        => { $crate::utils::num_complex::Complex64::new($re, $im) };
     ( $re:literal - $im:literal i )
-        => { num_complex::Complex64::new($re, -$im) };
+        => { $crate::utils::num_complex::Complex64::new($re, -$im) };
     ( $re:expr, $im:expr )
-        => { num_complex::Complex64::new($re, $im) };
+        => { $crate::utils::num_complex::Complex64::new($re, $im) };
     ( $r:expr, e $ph:expr )
-        => { num_complex::Complex64::from_polar($r, $ph) };
+        => { $crate::utils::num_complex::Complex64::from_polar($r, $ph) };
 }
+
+pub extern crate itertools;
+pub extern crate ndarray;
 
 /// Handles repeated calls with varied inputs to a closure outputting some
 /// number of values, storing them in `ndarray::Array`s of appropriate shape.
@@ -270,7 +275,7 @@ macro_rules! loop_call {
             };
 
             let _input_idx_
-                = itertools::Itertools::multi_cartesian_product(
+                = $crate::utils::itertools::Itertools::multi_cartesian_product(
                     _Nvals_.iter().map(|n| 0..*n)
                 );
             let mut _outputs_: Vec<( $( $rtype ),+ ,)>
@@ -300,10 +305,11 @@ macro_rules! loop_call {
             }
 
             let ( $( $rvar ),+ ,): ( $( Vec<$rtype> ),+ ,)
-                = itertools::Itertools::multiunzip(_outputs_.into_iter());
+                = $crate::utils::itertools::Itertools::multiunzip(
+                    _outputs_.into_iter());
             (
                 $(
-                    ndarray::Array::from_vec($rvar)
+                    $crate::utils::ndarray::Array::from_vec($rvar)
                         .into_shape(_Nvals_.as_slice())
                         .expect("couldn't reshape")
                 ),+

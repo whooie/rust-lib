@@ -17,7 +17,6 @@ use std::{
     path::Path,
 };
 use toml::{
-    self,
     Value,
     Table,
 };
@@ -1091,6 +1090,8 @@ impl From<ConfigUnver> for Table {
     fn from(config: ConfigUnver) -> Self { config.data }
 }
 
+pub extern crate toml;
+
 /// Define a simple function, `load_config` to read and process independent
 /// values from a table in a `.toml` file and return them as a `Config` struct.
 ///
@@ -1117,13 +1118,13 @@ macro_rules! config_fn {
         pub fn load_config(infile: std::path::PathBuf) -> Config {
             let infile: std::path::PathBuf
                 = infile.unwrap_or(std::path::PathBuf::from($file));
-            let table: toml::Value
+            let table: $crate::config::toml::Value
                 = std::fs::read_to_string(infile.clone())
                 .expect(
                     format!("Couldn't read config file {:?}", infile)
                     .as_str()
                 )
-                .parse::<toml::Value>()
+                .parse::<$crate::config::toml::Value>()
                 .expect(
                     format!("Couldn't parse config file {:?}", infile)
                     .as_str()
@@ -1148,17 +1149,6 @@ macro_rules! config_fn {
             }
             return config;
         }
-    }
-}
-
-#[cfg(test)]
-mod test {
-    use super::*;
-
-    #[test]
-    fn deref_test() {
-        let mut config = ConfigUnver::new();
-        config.insert("blah".to_string(), Value::Integer(0));
     }
 }
 
