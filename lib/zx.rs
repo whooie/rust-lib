@@ -569,11 +569,11 @@ impl From<KetBra> for Element {
 }
 
 trait LogicalStateOrd {
-    fn state_ord(&self, rhs: &Self) -> std::cmp::Ordering;
+    fn state_ord(&self, rhs: &Self) -> Ordering;
 }
 
 impl LogicalStateOrd for HashMap<usize, State> {
-    fn state_ord(&self, rhs: &Self) -> std::cmp::Ordering {
+    fn state_ord(&self, rhs: &Self) -> Ordering {
         let mut common: Vec<&usize>
             = self.keys().collect::<HashSet<&usize>>()
             .union(&rhs.keys().collect::<HashSet<&usize>>())
@@ -598,6 +598,13 @@ impl LogicalStateOrd for HashMap<usize, State> {
             }
         }
         return Ordering::Equal;
+    }
+}
+
+impl LogicalStateOrd for KetBra {
+    fn state_ord(&self, rhs: &Self) -> Ordering {
+        return self.bra.state_ord(&rhs.bra)
+            .then(self.ket.state_ord(&rhs.ket));
     }
 }
 
@@ -629,6 +636,12 @@ impl Element {
             .then_some(())
             .ok_or(ZXError::ElementBraSameKeys)?;
         return Ok(Self { terms: ketbras }.simplified());
+    }
+
+    fn collect_unchecked<I>(ketbras: I) -> Self
+    where I: IntoIterator<Item = KetBra>
+    {
+        return Self { terms: ketbras.into_iter().collect() };
     }
 
     /// Simplify `self` by folding terms with identical kets and bras into each
@@ -780,24 +793,56 @@ impl Element {
         J: IntoIterator<Item = usize>,
     {
         let a: C64 = a.unwrap_or(c!(-1.0));
+        let ins: Vec<usize> = ins.into_iter().collect();
+        let outs: Vec<usize> = outs.into_iter().collect();
         let terms: Vec<KetBra>
-            = Itertools::cartesian_product(
-                ins.into_iter()
-                    .map(|idx| [(idx, Zero), (idx, One)])
-                    .multi_cartesian_product(),
+            = if ins.is_empty() {
                 outs.into_iter()
                     .map(|idx| [(idx, Zero), (idx, One)])
-                    .multi_cartesian_product(),
-            )
-            .map(|(ins, outs)| {
-                let ampl: C64
-                    = ins.iter().chain(outs.iter())
-                    .any(|(_, s)| *s == Zero)
-                    .then_some(c!(1.0))
-                    .unwrap_or(a);
-                KetBra::new(ampl, outs, ins)
-            })
-            .collect();
+                    .multi_cartesian_product()
+                    .map(|outs| {
+                        let ampl: C64
+                            = outs.iter()
+                            .any(|(_, s)| *s == Zero)
+                            .then_some(c!(1.0))
+                            .unwrap_or(a);
+                        KetBra::new(ampl, outs, [])
+                    })
+                .collect()
+            } else if outs.is_empty() {
+                ins.into_iter()
+                    .map(|idx| [(idx, Zero), (idx, One)])
+                    .multi_cartesian_product()
+                    .map(|ins| {
+                        println!("{:?}", ins);
+                        let ampl: C64
+                            = ins.iter()
+                            .any(|(_, s)| *s == Zero)
+                            .then_some(c!(1.0))
+                            .unwrap_or(a);
+                        println!("{}", ampl);
+                        KetBra::new(ampl, [], ins)
+                    })
+                .collect()
+            } else {
+                Itertools::cartesian_product(
+                    ins.into_iter()
+                        .map(|idx| [(idx, Zero), (idx, One)])
+                        .multi_cartesian_product(),
+                    outs.into_iter()
+                        .map(|idx| [(idx, Zero), (idx, One)])
+                        .multi_cartesian_product(),
+                )
+                .map(|(ins, outs)| {
+                    let ampl: C64
+                        = ins.iter().chain(outs.iter())
+                        .any(|(_, s)| *s == Zero)
+                        .then_some(c!(1.0))
+                        .unwrap_or(a);
+                    KetBra::new(ampl, outs, ins)
+                })
+                .collect()
+            };
         return Self { terms };
     }
 
@@ -972,7 +1017,7 @@ impl Element {
     /// Normalize the amplitudes of all terms in `self` such that the majority
     /// will be `1`.
     ///
-    /// Ratios and relative phases between amplitudes are preserved.
+    /// Relative magnitudes and phases between amplitudes are preserved.
     pub fn normalize(&mut self) {
         let mut ampl_counts: Vec<(C64, usize)> = Vec::new();
         self.terms.iter()
@@ -990,7 +1035,10 @@ impl Element {
             });
         if let Some((norm_ampl, _))
             = ampl_counts.into_iter()
-            .max_by(|(_, l), (_, r)| l.cmp(r))
+            .max_by(|(ampl_l, count_l), (ampl_r, count_r)| {
+                count_l.cmp(count_r)
+                    .then(ampl_r.im.total_cmp(&ampl_l.im))
+            })
         {
             self.terms.iter_mut()
                 .for_each(|term| term.ampl /= norm_ampl);
@@ -1011,13 +1059,7 @@ impl Element {
 impl fmt::Display for Element {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         let mut terms: Vec<&KetBra> = self.terms.iter().collect();
-        let sort_by_bra: bool
-            = terms.iter().all(|kb| !kb.bra.is_empty());
-        if sort_by_bra {
-            terms.sort_by(|l, r| l.bra.state_ord(&r.bra));
-        } else {
-            terms.sort_by(|l, r| l.ket.state_ord(&r.ket));
-        }
+        terms.sort_by(|l, r| l.state_ord(r));
         let n: usize = terms.len();
         for (k, term) in terms.iter().enumerate() {
             term.fmt(f)?;
@@ -1039,6 +1081,7 @@ impl fmt::Display for Element {
 #[derive(Clone, Debug)]
 pub struct Diagram {
     slices: Vec<Element>,
+    scalar: C64,
 }
 
 impl Deref for Diagram {
@@ -1055,7 +1098,10 @@ impl FromIterator<Element> for Diagram {
     fn from_iter<I>(iter: I) -> Self
     where I: IntoIterator<Item = Element>
     {
-        return Self { slices: iter.into_iter().collect() };
+        return Self {
+            slices: iter.into_iter().collect(),
+            scalar: 1.0_f64.into(),
+        };
     }
 }
 
@@ -1080,7 +1126,12 @@ impl IntoIterator for Diagram {
 }
 
 impl From<Element> for Diagram {
-    fn from(elem: Element) -> Self { Self { slices: vec![elem] } }
+    fn from(elem: Element) -> Self {
+        return Self {
+            slices: vec![elem],
+            scalar: 1.0_f64.into()
+        };
+    }
 }
 
 impl Diagram {
@@ -1092,91 +1143,37 @@ impl Diagram {
     pub fn new<I>(elems: I) -> Self
     where I: IntoIterator<Item = Element>
     {
-        return Self { slices: elems.into_iter().collect() };
+        return Self {
+            slices: elems.into_iter().collect(),
+            scalar: 1.0_f64.into(),
+        };
     }
 
-    // /// Create a new diagram from a list of [`Element`]s.
-    // ///
-    // /// Fails if there exist consecutive elements whose inputs and outputs are
-    // /// not matched.
-    // pub fn new<I>(elems: I) -> ZXResult<Self>
-    // where I: IntoIterator<Item = Element>
-    // {
-    //     let mut elems = elems.into_iter().peekable();
-    //     return if let Some(first) = elems.peek() {
-    //         let mut prev_outs: HashSet<usize> = first.ins();
-    //         let slices: Vec<Element>
-    //             = elems
-    //             .map(|elem| {
-    //                 let next_ins = elem.ins();
-    //                 if prev_outs == next_ins {
-    //                     prev_outs = elem.outs();
-    //                     Ok(elem)
-    //                 } else {
-    //                     Err(ZXError::DiagramSliceMatchingWires)
-    //                 }
-    //             })
-    //             .collect::<ZXResult<Vec<Element>>>()?;
-    //         Ok(Self { slices })
-    //     } else {
-    //         Ok(Self { slices: Vec::new() })
-    //     };
-    // }
-    //
-    // /// Create a new diagram from a list of [`Element`]s, adding in identity
-    // /// operators as necessary to ensure that each element's outputs match the
-    // /// next element's inputs.
-    // pub fn new_with_id<I>(elems: I) -> ZXResult<Self>
-    // where I: IntoIterator<Item = Element>
-    // {
-    //     let mut elems = elems.into_iter().peekable();
-    //     return if let Some(first) = elems.peek() {
-    //         let mut prev_outs: HashSet<usize> = first.ins();
-    //         let mut next_ins: HashSet<usize>;
-    //         let mut all_wires: HashSet<usize>;
-    //         let mut new_last: Element;
-    //         let mut new_next: Element;
-    //         let mut slices: Vec<Element> = Vec::new();
-    //         for elem in elems {
-    //             next_ins = elem.ins();
-    //             if prev_outs != next_ins {
-    //                 all_wires = prev_outs.union(&next_ins).copied().collect();
-    //                 if let Some(last) = slices.last_mut() {
-    //                     new_last
-    //                         = Element::into_multikron(
-    //                             [last.clone()].into_iter()
-    //                                 .chain(
-    //                                     all_wires.difference(&prev_outs)
-    //                                         .map(|idx| Element::id(*idx))
-    //                                 )
-    //                         )?;
-    //                     *last = new_last;
-    //                 }
-    //                 new_next
-    //                     = Element::into_multikron(
-    //                         [elem].into_iter()
-    //                             .chain(
-    //                                 all_wires.difference(&next_ins)
-    //                                     .map(|idx| Element::id(*idx))
-    //                             )
-    //                     )?;
-    //                 prev_outs = new_next.outs();
-    //                 slices.push(new_next);
-    //             } else {
-    //                 prev_outs = elem.outs();
-    //                 slices.push(elem);
-    //             }
-    //         }
-    //         Ok(Self { slices })
-    //     } else {
-    //         Ok(Self { slices: Vec::new() })
-    //     };
-    // }
+    /// Set an overall scalar factor.
+    pub fn with_scalar(mut self, z: C64) -> Self {
+        self.scalar = z;
+        return self;
+    }
+
+    /// Set an overall scalar factor.
+    pub fn set_scalar(&mut self, z: C64) -> &mut Self {
+        self.scalar = z;
+        return self;
+    }
 
     /// Fold all slices of `self` into a single [`Element`] via the
     /// [dot-product][Element::dot], in the diagram order.
     pub fn contract(&self) -> ZXResult<Element> {
-        return Element::multidot(self.slices.iter().rev());
+        return Element::multidot(self.slices.iter().rev())
+            .map(|elem| {
+                Element::collect_unchecked(
+                    elem.into_iter()
+                        .map(|mut kb| {
+                            kb.ampl *= self.scalar;
+                            kb
+                        })
+                )
+            });
     }
 
     /// Compose `self` with `rhs` by attaching the outputs of `rhs` with the
@@ -1191,6 +1188,7 @@ impl Diagram {
                 .chain(self.slices.iter())
                 .cloned()
                 .collect(),
+            scalar: self.scalar * rhs.scalar,
         };
     }
 
@@ -1205,6 +1203,7 @@ impl Diagram {
                 .chain(rhs.slices.iter())
                 .cloned()
                 .collect(),
+            scalar: self.scalar * rhs.scalar,
         };
     }
 }
