@@ -72,15 +72,17 @@ macro_rules! eprintln_flush {
 #[macro_export]
 macro_rules! mkdir {
     ( $dir_pathbuf:expr ) => {
-        println!(":: mkdir -p {}", $dir_pathbuf.to_str().unwrap());
-        std::io::Write::flush(&mut std::io::stdout()).unwrap();
-        std::fs::create_dir_all($dir_pathbuf.as_path())
-            .expect(
-                format!(
-                    "Couldn't create directory {:?}",
-                    $dir_pathbuf.to_str().unwrap()
-                ).as_str()
-            );
+        if !$dir_pathbuf.is_dir() {
+            println!(":: mkdir -p {}", $dir_pathbuf.to_str().unwrap());
+            std::io::Write::flush(&mut std::io::stdout()).unwrap();
+            std::fs::create_dir_all($dir_pathbuf.as_path())
+                .expect(
+                    format!(
+                        "Couldn't create directory {:?}",
+                        $dir_pathbuf.to_str().unwrap()
+                    ).as_str()
+                );
+        }
     }
 }
 
