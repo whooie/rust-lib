@@ -98,11 +98,11 @@ macro_rules! read_npz {
         {
             let _input_filepath_ = $filepath.clone();
             $crate::nd_utils::ndarray_npy::NpzReader::new(
-                    std::fs::File::open(_input_filepath_)
+                    std::fs::File::open(_input_filepath_.clone())
                         .expect(
                             format!(
                                 "Couldn't open npz file '{:?}'",
-                                _input_filepath_
+                                _input_filepath_.clone()
                             ).as_str()
                         )
                 ).expect(
