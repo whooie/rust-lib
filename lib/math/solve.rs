@@ -71,7 +71,7 @@ where D: nd::Dimension
                 + other.mapv(|b| b.abs() as f64)
             );
         let diff: nd::Array<f64, D> = (self - other).mapv(|d| d.abs() as f64);
-        return scale.into_iter().zip(diff.into_iter())
+        return scale.into_iter().zip(diff)
             .map(|(s, d)| d / (s + f64::EPSILON))
             .max_by(|l, r| {
                 match l.partial_cmp(r) {
@@ -89,7 +89,7 @@ where D: nd::Dimension
         let scale: nd::Array<f64, D>
             = (err0 / 2.0) * (self.mapv(f64::abs) + other.mapv(f64::abs));
         let diff: nd::Array<f64, D> = (self - other).mapv(f64::abs);
-        return scale.into_iter().zip(diff.into_iter())
+        return scale.into_iter().zip(diff)
             .map(|(s, d)| d / (s + f64::EPSILON))
             .max_by(|l, r| {
                 match l.partial_cmp(r) {
@@ -110,7 +110,7 @@ where D: nd::Dimension
                 + other.mapv(|b| b.norm() as f64)
             );
         let diff: nd::Array<f64, D> = (self - other).mapv(|d| d.norm() as f64);
-        return scale.into_iter().zip(diff.into_iter())
+        return scale.into_iter().zip(diff)
             .map(|(s, d)| d / (s + f64::EPSILON))
             .max_by(|l, r| {
                 match l.partial_cmp(r) {
@@ -128,7 +128,7 @@ where D: nd::Dimension
         let scale: nd::Array<f64, D>
             = (self.mapv(C64::norm) + other.mapv(C64::norm)) * (err0 / 2.0);
         let diff: nd::Array<f64, D> = (self - other).mapv(C64::norm);
-        return scale.into_iter().zip(diff.into_iter())
+        return scale.into_iter().zip(diff)
             .map(|(s, d)| d / (s + f64::EPSILON))
             .max_by(|l, r| {
                 match l.partial_cmp(r) {
@@ -205,8 +205,8 @@ where
     let y_next: nd::Array<V, ND>
         = y.iter()
             .zip(std::iter::Iterator::zip(
-                k1.into_iter().zip(k2.into_iter()),
-                k3.into_iter().zip(k4.into_iter()),
+                k1.into_iter().zip(k2),
+                k3.into_iter().zip(k4),
             ))
             .map(|(yk, ((k1k, k2k), (k3k, k4k)))| {
                 *yk + dx * 6.0_f64.powi(-1) * (

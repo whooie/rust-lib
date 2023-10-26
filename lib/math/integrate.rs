@@ -60,7 +60,7 @@ where
         .map(|(xk, xkp1)| *xkp1 - *xk)
         .collect();
     let mut acc = A::zero();
-    y.iter().take(n - 1).zip(y.iter().skip(1)).zip(dx.into_iter())
+    y.iter().take(n - 1).zip(y.iter().skip(1)).zip(dx)
         .for_each(|((ykm1, yk), dxkm1)| {
             acc += (ykm1.clone() + yk.clone()) * (dxkm1 * 0.5);
         });
@@ -109,7 +109,7 @@ where
     let mut acc: nd::Array<A, <D as nd::Dimension>::Smaller>
         = nd::Array::zeros(y.raw_dim().remove_axis(ndaxis));
     y.axis_iter(ndaxis).take(n - 1).zip(y.axis_iter(ndaxis).skip(1))
-        .zip(dx.into_iter())
+        .zip(dx)
         .for_each(|((yk, ykp1), dxk)| {
             acc += &(
                 yk.mapv(|ykj| ykj * (dxk * 0.5))
@@ -294,7 +294,7 @@ where
     let mut I: nd::Array1<A> = nd::Array::zeros(n);
     let mut acc = A::zero();
     let i: nd::Array1<A>
-        = y.iter().take(n - 1).zip(y.iter().skip(1)).zip(dx.into_iter())
+        = y.iter().take(n - 1).zip(y.iter().skip(1)).zip(dx)
         .map(|((ykm1, yk), dxkm1)| {
             acc += (ykm1.clone() + yk.clone()) * (dxkm1 * 0.5);
             acc.clone()
@@ -369,7 +369,7 @@ where
         = nd::Array::zeros(y.raw_dim().remove_axis(ndaxis));
     let slices: Vec<nd::Array<A, <D as nd::Dimension>::Smaller>>
         = y.axis_iter(ndaxis).take(n - 1).zip(y.axis_iter(ndaxis).skip(1))
-        .zip(dx.into_iter())
+        .zip(dx)
         .map(|((ykm1, yk), dxkm1)| {
             acc.iter_mut().zip(ykm1.iter().zip(yk.iter()))
                 .for_each(|(accj, (ykm1j, ykj))| {
@@ -480,7 +480,7 @@ where
     let tr: nd::Array1<A> = trapz_prog(y, dx);
     let si: nd::Array1<A> = simpson_prog(y, dx);
     let I: nd::Array1<A>
-        = tr.into_iter().zip(si.into_iter()).enumerate()
+        = tr.into_iter().zip(si).enumerate()
         .map(|(k, (trk, sik))| if k % 2 == 0 { sik } else { trk })
         .collect();
     return I;

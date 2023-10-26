@@ -77,7 +77,8 @@ impl Eq for Probability { }
 
 impl PartialOrd for Probability {
     fn partial_cmp(&self, other: &Self) -> Option<std::cmp::Ordering> {
-        return self.p().partial_cmp(&other.p());
+        Some(self.cmp(other))
+        // return Some(self.cmp(other));
     }
 }
 
@@ -558,7 +559,7 @@ where
         cdf.mapv_inplace(|c| c / norm);
 
         let dist: Vec<(V, f64, f64)>
-            = x.into_iter().zip(pdf.into_iter().zip(cdf.into_iter()))
+            = x.into_iter().zip(pdf.into_iter().zip(cdf))
             .map(|(xk, (pdfk, cdfk))| (xk, pdfk, cdfk))
             .collect();
         return Self { dist };
@@ -690,7 +691,7 @@ where
             .for_each(|(p, (dpl, dpr))| { *p += *dpl + *dpr; });
 
         let dist: Vec<(V, f64, f64)>
-            = x.into_iter().zip(pdf.into_iter().zip(cdf.into_iter()))
+            = x.into_iter().zip(pdf.into_iter().zip(cdf))
             .map(|(xk, (pdfk, cdfk))| (xk, pdfk / cdf_last, cdfk / cdf_last))
             .collect();
         return Self { dist };
@@ -911,7 +912,7 @@ where
             inside,
             pdf_func: pdf,
             cdf_func: cdf,
-            nr_options: nr_options.unwrap_or(NROptions::default()),
+            nr_options: nr_options.unwrap_or_default(),
         };
     }
 

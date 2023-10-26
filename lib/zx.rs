@@ -312,8 +312,8 @@ impl KetBra {
         return Ok(
             Self::new(
                 self.ampl * rhs.ampl,
-                self.ket.into_iter().chain(rhs.ket.into_iter()),
-                self.bra.into_iter().chain(rhs.bra.into_iter()),
+                self.ket.into_iter().chain(rhs.ket),
+                self.bra.into_iter().chain(rhs.bra),
             )
         );
     }
