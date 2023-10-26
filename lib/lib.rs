@@ -3,14 +3,15 @@
 #![allow(non_upper_case_globals)]
 #![allow(clippy::needless_return)]
 
-//! This crate is a collection of useful types, traits, and functions mostly
-//! meant for light, general-purpose scientific use with `ndarray`, `plotly`,
-//! `pyo3`, and some others.
+//! This crate is a collection of utilities meant for light, general-purpose
+//! (mostly) scientific use.
 
-pub mod config;
 pub mod error;
 pub mod utils;
 pub mod phys;
+
+#[cfg(feature = "config")]
+pub mod config;
 
 #[cfg(feature = "nd")]
 pub mod nd;
@@ -21,8 +22,8 @@ pub mod nd_utils;
 #[cfg(feature = "plotting")]
 pub mod plotdefs;
 
-#[cfg(feature = "plotting-plotly")]
-pub mod plotlydefs;
+// #[cfg(feature = "plotting-plotly")]
+// pub mod plotlydefs;
 
 #[cfg(feature = "pyo3-utils")]
 pub mod pyo3_utils;

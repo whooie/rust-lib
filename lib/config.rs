@@ -1,46 +1,44 @@
-//! Provides definitions for loading and verifying values from TOML-formatted
-//! config files.
+//! Provides definitions for loading and verifying values from common config
+//! file formats.
+//!
+//! Structures aim to preserve the default type structures of their respective
+//! config [deserializer][serde] crates.
+//!
+//! The important traits are made public for custom applications and newtype
+//! wrapping, but the following formats are directly supported:
+//! - [TOML][toml]
+//! - [JSON][serde_json]
+//! - [YAML][serde_yaml][^1]
+//!
+//! [^1]: No tagged values and only string keys
 
 use std::{
-    collections::{
-        HashMap,
-        HashSet,
-    },
+    collections::{ HashMap, HashSet },
     fmt,
     fs,
     io::Write,
     iter::Peekable,
-    ops::{
-        Deref,
-        DerefMut,
-    },
     path::Path,
+    str::FromStr,
 };
-use toml::{
-    Value,
-    Table,
-};
-use serde::Deserialize;
+use toml;
+use serde_json as json;
+use serde_yaml as yaml;
+use serde::Serialize;
 use thiserror::Error;
 
 #[derive(Error, Debug)]
 pub enum ConfigError {
-    #[error("config: invalid type for key '{0}':\n\texpected type <{1}> but got value '{2}'")]
-    InvalidType(String, String, String),
-
-    #[error("config: invalid value for key '{0}':\n\texpected value to satisfy '{1}' but got '{2}'")]
+    #[error("config: invalid value for key '{0}': expected value to satisfy '{1}' but got {2}")]
     InvalidValue(String, String, String),
 
-    #[error("config: encountered imcompatible structure")]
+    #[error("config: encountered incompatible structure")]
     IncompatibleStructure,
 
     #[error("config: missing key '{0}'")]
     MissingKey(String),
 
-    #[error("config: key path too long at key '{0}'")]
-    KeyPathTooLong(String),
-
-    #[error("config: failed to convert type of value {0}")]
+    #[error("config: failed to convert type of value at key '{0}'")]
     FailedTypeConversion(String),
 
     #[error("config: couldn't read file '{0}'")]
@@ -49,1106 +47,1711 @@ pub enum ConfigError {
     #[error("config: couldn't parse file '{0}'")]
     FileParse(String),
 
-    #[error("config: couldn't open file '{0}':\n\t{1}")]
+    #[error("config: couldn't parse string")]
+    StrParse,
+
+    #[error("config: couldn't open file '{0}': {1}")]
     FileOpen(String, String),
 
-    #[error("config: couldn't write to file '{0}':\n\t{1}")]
+    #[error("config: couldn't write to file '{0}': {1}")]
     FileWrite(String, String),
 
-    #[error("config: serialization error '{0}'")]
-    SerializationError(#[from] toml::ser::Error),
+    #[error("config: TOML error '{0}'")]
+    TomlError(#[from] toml::ser::Error),
+
+    #[error("config: JSON error '{0}'")]
+    JsonError(#[from] json::Error),
+
+    #[error("config: YAML error '{0}'")]
+    YamlError(#[from] yaml::Error),
 }
 pub type ConfigResult<T> = Result<T, ConfigError>;
 
-/// Config value type specification via the TOML format.
-///
-/// See [`toml::Value`]
+/// Represents a constraint on the type and/or value of an item in a config.
+pub trait ValueVerifier<V> {
+    /// Return `true` if `value` matches the type specification, `false`
+    /// otherwise.
+    fn verify(&self, value: &V) -> bool;
+
+    /// Return `value` if it matches the type specification, `err` otherwise.
+    fn verify_ok_or<E>(&self, value: V, err: E) -> Result<V, E> {
+        self.verify(&value).then_some(value).ok_or(err)
+    }
+}
+
+/// Config value type specification.
 #[derive(Clone, Debug)]
-pub enum TypeVer {
-    /// [`toml::Value::Boolean`]
+pub enum Verifier {
+    /// Null value
+    Null,
+    /// Boolean value
     Bool,
-    /// [`toml::Value::Integer`]
+    /// Integer value (default `i64`)
     Int,
-    /// [`toml::Value::Float`]
+    /// A range of integer (default `i64`) values
+    IntRange {
+        min: i64,
+        max: i64,
+        incl_min: bool,
+        incl_max: bool,
+    },
+    /// A discrete collection of integer (default `i64`) values
+    IntColl(HashSet<i64>),
+    /// Floating-point value (default `f64`)
     Float,
-    /// [`toml::Value::Datetime`]
+    /// A range of floating-point (default `f64`) values
+    FloatRange {
+        min: f64,
+        max: f64,
+        incl_min: bool,
+        incl_max: bool,
+    },
+    /// An integer or floating-point value
+    Number,
+    /// A date-time value
     Datetime,
-    /// [`toml::Value::Array`]
+    /// An array of any length or type
     Array,
-    /// [`toml::Value::Array`] holding only specified types, optionally in
-    /// specific positions.
-    TypedArray {
-        types: Vec<TypeVer>,
+    /// An array with constrained values.
+    ///
+    /// Using `finite = true` will impose constraints on the length and position
+    /// of each value in the array; `finite = false` will permit any collection
+    /// of values that satisfies at least one of the contained constraints.
+    ArrayForm {
+        forms: Vec<Verifier>,
         finite: bool,
     },
-    /// [`toml::Value::String`]
+    /// String value
     Str,
-    /// [`toml::Value::Table`].
-    ///
-    /// See [`ConfigSpecItem`] to recurse into a full specification for the
-    /// table.
+    /// A discrete collection of string values
+    StrColl(HashSet<String>),
+    /// A sub-table
     Table,
-    /// Any single TOML type.
+    /// Any non-table value
     Any,
-    /// Any TOML type, including a table.
+    /// Any value, including a sub-table
     AnyTable,
 }
 
-impl TypeVer {
-    /// Return `true` if `value` matches the type specification, `false`
-    /// otherwise.
-    pub fn verify(&self, value: &Value) -> bool {
-        return match (self, value) {
+impl fmt::Display for Verifier {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::Null => write!(f, "Null"),
+            Self::Bool => write!(f, "Bool"),
+            Self::Int => write!(f, "Int"),
+            Self::IntRange { min, max, incl_min, incl_max } => {
+                write!(f, "IntRange{}", if *incl_min { "[" } else { "(" })?;
+                min.fmt(f)?;
+                write!(f, ", ")?;
+                max.fmt(f)?;
+                write!(f, "{}", if *incl_max { "]" } else { ")" })?;
+                Ok(())
+            },
+            Self::IntColl(coll) => {
+                let items: String
+                    = coll.iter()
+                    .map(|i| i.to_string())
+                    .collect::<Vec<String>>()
+                    .join(", ");
+                write!(f, "IntCollection{{{}}}", items)?;
+                Ok(())
+            },
+            Self::Float => write!(f, "Float"),
+            Self::FloatRange { min, max, incl_min, incl_max } => {
+                write!(f, "FloatRange{}", if *incl_min { "[" } else { "(" })?;
+                min.fmt(f)?;
+                write!(f, ", ")?;
+                max.fmt(f)?;
+                write!(f, "{}", if *incl_max { "]" } else { ")" })?;
+                Ok(())
+            },
+            Self::Number => write!(f, "Number"),
+            Self::Datetime => write!(f, "Datetime"),
+            Self::Array => write!(f, "Array"),
+            Self::ArrayForm { forms, finite } => {
+                let items: String
+                    = forms.iter()
+                    .map(|f| f.to_string())
+                    .collect::<Vec<String>>()
+                    .join(", ");
+                write!(f, "ArrayForm([{}], finite={})", items, finite)?;
+                Ok(())
+            },
+            Self::Str => write!(f, "Str"),
+            Self::StrColl(coll) => {
+                let items: String
+                    = coll.iter()
+                    .map(|s| s.as_ref())
+                    .collect::<Vec<&str>>()
+                    .join(", ");
+                write!(f, "StrCollection{{{}}}", items)?;
+                Ok(())
+            },
+            Self::Table => write!(f, "Table"),
+            Self::Any => write!(f, "Any"),
+            Self::AnyTable => write!(f, "AnyTable"),
+        }
+    }
+}
+
+impl ValueVerifier<toml::Value> for Verifier {
+    fn verify(&self, value: &toml::Value) -> bool {
+        use toml::Value;
+
+        match (self, value) {
             (Self::Bool, Value::Boolean(_)) => true,
             (Self::Int, Value::Integer(_)) => true,
+            (
+                Self::IntRange { min, max, incl_min, incl_max },
+                Value::Integer(i),
+            ) => {
+                let in_min: bool
+                    = if *incl_min { *i >= *min } else { *i > *min };
+                let in_max: bool
+                    = if *incl_max { *i <= *max } else { *i < *max };
+                in_min && in_max
+            },
+            (Self::IntColl(coll), Value::Integer(i)) => coll.contains(i),
             (Self::Float, Value::Float(_)) => true,
+            (
+                Self::FloatRange { min, max, incl_min, incl_max },
+                Value::Float(f),
+            ) => {
+                let in_min: bool
+                    = if *incl_min { *f >= *min } else { *f > *min };
+                let in_max: bool
+                    = if *incl_max { *f <= *max } else { *f < *max };
+                in_min && in_max
+            },
+            (Self::Number, Value::Integer(_))
+                | (Self::Number, Value::Float(_))
+                => true,
             (Self::Datetime, Value::Datetime(_)) => true,
-            (Self::TypedArray { types, finite }, Value::Array(a)) => {
+            (Self::Array, Value::Array(_)) => true,
+            (Self::ArrayForm { forms, finite }, Value::Array(a)) => {
                 if *finite {
-                    types.len() == a.len()
-                        && types.iter().zip(a.iter())
-                            .all(|(tyk, ak)| tyk.verify(ak))
+                    forms.len() == a.len()
+                        && forms.iter().zip(a)
+                            .all(|(fk, ak)| fk.verify(ak))
                 } else {
                     a.iter()
-                        .all(|ak| types.iter().any(|tyk| tyk.verify(ak)))
+                        .all(|ak| forms.iter().any(|fk| fk.verify(ak)))
                 }
             },
             (Self::Str, Value::String(_)) => true,
+            (Self::StrColl(coll), Value::String(s)) => coll.contains(s),
             (Self::Table, Value::Table(_)) => true,
             (Self::Any, Value::Boolean(_))
-                | (Self::Any, Value::Integer(_))
                 | (Self::Any, Value::Float(_))
                 | (Self::Any, Value::Datetime(_))
                 | (Self::Any, Value::Array(_))
                 => true,
             (Self::AnyTable, _) => true,
             _ => false,
-        };
-    }
-
-    /// Return `Ok(value)` if `value` matches the type specification, `Err(err)`
-    /// otherwise.
-    pub fn verify_ok_or(&self, value: Value, err: ConfigError)
-        -> ConfigResult<Value>
-    {
-        return self.verify(&value).then_some(value).ok_or(err);
+        }
     }
 }
 
-impl fmt::Display for TypeVer {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        return match self {
-            Self::Bool => write!(f, "Bool"),
-            Self::Int => write!(f, "Int"),
-            Self::Float => write!(f, "Float"),
-            Self::Datetime => write!(f, "Datetime"),
-            Self::Array => write!(f, "Array"),
-            Self::TypedArray { types, finite } => {
-                let n: usize = types.len();
-                write!(f, "TypedArray([")?;
-                for (k, tyk) in types.iter().enumerate() {
-                    tyk.fmt(f)?;
-                    if k < n - 1 { write!(f, ", ")?; }
+impl ValueVerifier<json::Value> for Verifier {
+    fn verify(&self, value: &json::Value) -> bool {
+        use serde_json::Value;
+
+        match (self, value) {
+            (Self::Null, Value::Null) => true,
+            (Self::Bool, Value::Bool(_)) => true,
+            (Self::Int, Value::Number(n)) => n.is_i64() || n.is_u64(),
+            (
+                Self::IntRange { min, max, incl_min, incl_max },
+                Value::Number(n),
+            ) => {
+                if let Some(i) = n.as_i64() {
+                    let in_min: bool
+                        = if *incl_min { i >= *min } else { i > *min };
+                    let in_max: bool
+                        = if *incl_max { i <= *max } else { i < *max };
+                    in_min && in_max
+                } else if let Some(u) = n.as_u64() {
+                    let u: i128 = u.into();
+                    let min: i128 = (*min).into();
+                    let max: i128 = (*max).into();
+                    let in_min: bool
+                        = if *incl_min { u >= min } else { u > min };
+                    let in_max: bool
+                        = if *incl_max { u <= max } else { u < max };
+                    in_min && in_max
+                } else {
+                    false
                 }
-                write!(f, ", finite={})", finite)?;
-                Ok(())
             },
-            Self::Str => write!(f, "Str"),
-            Self::Table => write!(f, "Table"),
-            Self::Any => write!(f, "Any"),
-            Self::AnyTable => write!(f, "AnyTable"),
-        };
-    }
-}
-
-/// Config specification to bound possible values found in a config file.
-#[derive(Clone, Debug)]
-pub enum ValueVer {
-    IntRange {
-        min: i64,
-        max: i64,
-        incl_start: bool,
-        incl_end: bool,
-    },
-    FloatRange {
-        min: f64,
-        max: f64,
-        incl_start: bool,
-        incl_end: bool,
-    },
-    StrColl(HashSet<String>),
-}
-
-impl ValueVer {
-    /// Return `true` if `value` matches the specification, `false` otherwise.
-    pub fn verify(&self, value: &Value) -> bool {
-        return match (self, value) {
+            (Self::Float, Value::Number(n)) => n.is_f64(),
             (
-                Self::IntRange { min, max, incl_start, incl_end },
-                Value::Integer(i),
+                Self::FloatRange { min, max, incl_min, incl_max },
+                Value::Number(n),
             ) => {
-                let in_start: bool
-                    = if *incl_start { *i >= *min } else { *i > *min };
-                let in_end: bool
-                    = if *incl_end { *i <= *max } else { *i < *max };
-                in_start && in_end
+                if let Some(f) = n.as_f64() {
+                    let in_min: bool
+                        = if *incl_min { f >= *min } else { f > *min };
+                    let in_max: bool
+                        = if *incl_max { f <= *max } else { f < *max };
+                    in_min && in_max
+                } else {
+                    false
+                }
             },
-            (
-                Self::FloatRange { min, max, incl_start, incl_end },
-                Value::Float(f),
-            ) => {
-                let in_start: bool
-                    = if *incl_start { *f >= *min } else { *f > *min };
-                let in_end: bool
-                    = if *incl_end { *f <= *max } else { *f < *max };
-                in_start && in_end
+            (Self::Array, Value::Array(_)) => true,
+            (Self::ArrayForm { forms, finite }, Value::Array(a)) => {
+                if *finite {
+                    forms.len() == a.len()
+                        && forms.iter().zip(a)
+                            .all(|(fk, ak)| fk.verify(ak))
+                } else {
+                    a.iter()
+                        .all(|ak| forms.iter().any(|fk| fk.verify(ak)))
+                }
             },
-            (Self::StrColl(strs), Value::String(s)) => strs.contains(s),
+            (Self::Str, Value::String(_)) => true,
+            (Self::StrColl(coll), Value::String(s)) => coll.contains(s),
+            (Self::Table, Value::Object(_)) => true,
+            (Self::Any, Value::Bool(_))
+                | (Self::Any, Value::Number(_))
+                | (Self::Any, Value::Array(_))
+                | (Self::Any, Value::String(_))
+                => true,
+            (Self::AnyTable, _) => true,
             _ => false,
-        };
-    }
-
-    /// Return `Ok(value)` if `value` matches the specification, `Err(err)`
-    /// otherwise.
-    pub fn verify_ok_or(&self, value: Value, err: ConfigError)
-        -> ConfigResult<Value>
-    {
-        return self.verify(&value).then_some(value).ok_or(err);
+        }
     }
 }
 
-impl fmt::Display for ValueVer {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        return match self {
-            Self::IntRange { min, max, incl_start, incl_end } => {
-                write!(f, "IntRange{}", if *incl_start { "[" } else { "(" })?;
-                min.fmt(f)?;
-                write!(f, ", ")?;
-                max.fmt(f)?;
-                write!(f, "{}", if *incl_end { "]" } else { ")" })?;
-                Ok(())
-            },
-            Self::FloatRange { min, max, incl_start, incl_end } => {
-                write!(f, "FloatRange{}", if *incl_start { "[" } else { "(" })?;
-                min.fmt(f)?;
-                write!(f, ", ")?;
-                max.fmt(f)?;
-                write!(f, "{}", if *incl_end { "]" } else { ")" })?;
-                Ok(())
-            },
-            Self::StrColl(strs) => {
-                let n: usize = strs.len();
-                write!(f, "StrCollection{{")?;
-                for (k, sk) in strs.iter().enumerate() {
-                    sk.fmt(f)?;
-                    if k < n - 1 { write!(f, ", ")?; }
+impl ValueVerifier<yaml::Value> for Verifier {
+    fn verify(&self, value: &yaml::Value) -> bool {
+        use serde_yaml::Value;
+
+        match (self, value) {
+            (Self::Null, Value::Null) => true,
+            (Self::Bool, Value::Bool(_)) => true,
+            (Self::Int, Value::Number(n)) => n.is_i64() || n.is_u64(),
+            (
+                Self::IntRange { min, max, incl_min, incl_max },
+                Value::Number(n),
+            ) => {
+                if let Some(i) = n.as_i64() {
+                    let in_min: bool
+                        = if *incl_min { i >= *min } else { i > *min };
+                    let in_max: bool
+                        = if *incl_max { i <= *max } else { i < *max };
+                    in_min && in_max
+                } else if let Some(u) = n.as_u64() {
+                    let u: i128 = u.into();
+                    let min: i128 = (*min).into();
+                    let max: i128 = (*max).into();
+                    let in_min: bool
+                        = if *incl_min { u >= min } else { u > min };
+                    let in_max: bool
+                        = if *incl_max { u <= max } else { u < max };
+                    in_min && in_max
+                } else {
+                    false
                 }
-                write!(f, "}}")?;
-                Ok(())
             },
-        };
-    }
-}
-
-/// Holds either a type or value specification.
-#[derive(Clone, Debug)]
-pub enum Verifier {
-    TypeVer(TypeVer),
-    ValueVer(ValueVer),
-}
-
-impl fmt::Display for Verifier {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        return match self {
-            Self::TypeVer(type_ver) => type_ver.fmt(f),
-            Self::ValueVer(value_ver) => value_ver.fmt(f),
-        };
+            (Self::Float, Value::Number(n)) => n.is_f64(),
+            (
+                Self::FloatRange { min, max, incl_min, incl_max },
+                Value::Number(n),
+            ) => {
+                if let Some(f) = n.as_f64() {
+                    let in_min: bool
+                        = if *incl_min { f >= *min } else { f > *min };
+                    let in_max: bool
+                        = if *incl_max { f <= *max } else { f < *max };
+                    in_min && in_max
+                } else {
+                    false
+                }
+            },
+            (Self::Array, Value::Sequence(_)) => true,
+            (Self::ArrayForm { forms, finite }, Value::Sequence(a)) => {
+                if *finite {
+                    forms.len() == a.len()
+                        && forms.iter().zip(a)
+                            .all(|(fk, ak)| fk.verify(ak))
+                } else {
+                    a.iter()
+                        .all(|ak| forms.iter().any(|fk| fk.verify(ak)))
+                }
+            },
+            (Self::Str, Value::String(_)) => true,
+            (Self::StrColl(coll), Value::String(s)) => coll.contains(s),
+            (Self::Table, Value::Mapping(_)) => true,
+            (Self::Any, Value::Bool(_))
+                | (Self::Any, Value::Number(_))
+                | (Self::Any, Value::Sequence(_))
+                | (Self::Any, Value::String(_))
+                => true,
+            (Self::AnyTable, Value::Bool(_))
+                | (Self::AnyTable, Value::Number(_))
+                | (Self::AnyTable, Value::Sequence(_))
+                | (Self::AnyTable, Value::String(_))
+                | (Self::AnyTable, Value::Mapping(_))
+                => true,
+            _ => false,
+        }
     }
 }
 
 /// An item in a config specification, either a type/value specification for
 /// single values or a set of specifications for a sub-table.
 #[derive(Clone, Debug)]
-pub enum ConfigSpecItem {
-    Value(Verifier),
-    Table(ConfigSpec),
+pub enum ConfigSpecItem<U, V>
+where U: ValueVerifier<V>
+{
+    Value(U),
+    Table(ConfigSpec<U, V>),
 }
 
-/// Shorthand for creating [`ConfigSpecItem`]s.
-#[macro_export]
-macro_rules! spec {
-    ( Bool ) => {
-        $crate::config::ConfigSpecItem::Value(
-            $crate::config::Verifier::TypeVer(
-                $crate::config::TypeVer::Bool
-            )
-        )
-    };
-    ( Int ) => {
-        $crate::config::ConfigSpecItem::Value(
-            $crate::config::Verifier::TypeVer(
-                $crate::config::TypeVer::Int
-            )
-        )
-    };
-    ( Float ) => {
-        $crate::config::ConfigSpecItem::Value(
-            $crate::config::Verifier::TypeVer(
-                $crate::config::TypeVer::Float
-            )
-        )
-    };
-    ( Datetime ) => {
-        $crate::config::ConfigSpecItem::Value(
-            $crate::config::Verifier::TypeVer(
-                $crate::config::TypeVer::Datetime
-            )
-        )
-    };
-    ( Array ) => {
-        $crate::config::ConfigSpecItem::Value(
-            $crate::config::Verifier::TypeVer(
-                $crate::config::TypeVer::Array
-            )
-        )
-    };
-    ( TypedArray { [ $( $t:expr ),* $(,)? ], finite: $f:expr } ) => {
-        $crate::config::ConfigSpecItem::Value(
-            $crate::config::Verifier::TypeVer(
-                $crate::config::TypeVer::TypedArray {
-                    types: vec![ $( $t ),* ], finite: $f
-                }
-            )
-        )
-    };
-    ( Str ) => {
-        $crate::config::ConfigSpecItem::Value(
-            $crate::config::Verifier::TypeVer(
-                $crate::config::TypeVer::Str
-            )
-        )
-    };
-    ( Table ) => {
-        $crate::config::ConfigSpecItem::Value(
-            $crate::config::Verifier::TypeVer(
-                $crate::config::TypeVer::Table
-            )
-        )
-    };
-    ( Any ) => {
-        $crate::config::ConfigSpecItem::Value(
-            $crate::config::Verifier::TypeVer(
-                $crate::config::TypeVer::Any
-            )
-        )
-    };
-    ( AnyTable ) => {
-        $crate::config::ConfigSpecItem::Value(
-            $crate::config::Verifier::TypeVer(
-                $crate::config::TypeVer::AnyTable
-            )
-        )
-    };
-    ( IntRange { ($min:expr, $max:expr) } ) => {
-        $crate::config::ConfigSpecItem::Value(
-            $crate::config::Verifier::ValueVer(
-                $crate::config::ValueVer::IntRange {
-                    min: $min,
-                    max: $max,
-                    incl_start: false,
-                    incl_end: false,
-                }
-            )
-        )
-    };
-    ( IntRange { ($min:expr, $max:expr)= } ) => {
-        $crate::config::ConfigSpecItem::Value(
-            $crate::config::Verifier::ValueVer(
-                $crate::config::ValueVer::IntRange {
-                    min: $min,
-                    max: $max,
-                    incl_start: false,
-                    incl_end: true,
-                }
-            )
-        )
-    };
-    ( IntRange { =($min:expr, $max:expr) } ) => {
-        $crate::config::ConfigSpecItem::Value(
-            $crate::config::Verifier::ValueVer(
-                $crate::config::ValueVer::IntRange {
-                    min: $min,
-                    max: $max,
-                    incl_start: true,
-                    incl_end: false,
-                }
-            )
-        )
-    };
-    ( IntRange { =($min:expr, $max:expr)= } ) => {
-        $crate::config::ConfigSpecItem::Value(
-            $crate::config::Verifier::ValueVer(
-                $crate::config::ValueVer::IntRange {
-                    min: $min,
-                    max: $max,
-                    incl_start: true,
-                    incl_end: true,
-                }
-            )
-        )
-    };
-    ( FloatRange { ($min:expr, $max:expr) } ) => {
-        $crate::config::ConfigSpecItem::Value(
-            $crate::config::Verifier::ValueVer(
-                $crate::config::ValueVer::FloatRange {
-                    min: $min,
-                    max: $max,
-                    incl_start: false,
-                    incl_end: false,
-                }
-            )
-        )
-    };
-    ( FloatRange { ($min:expr, $max:expr)= } ) => {
-        $crate::config::ConfigSpecItem::Value(
-            $crate::config::Verifier::ValueVer(
-                $crate::config::ValueVer::FloatRange {
-                    min: $min,
-                    max: $max,
-                    incl_start: false,
-                    incl_end: true,
-                }
-            )
-        )
-    };
-    ( FloatRange { =($min:expr, $max:expr) } ) => {
-        $crate::config::ConfigSpecItem::Value(
-            $crate::config::Verifier::ValueVer(
-                $crate::config::ValueVer::FloatRange {
-                    min: $min,
-                    max: $max,
-                    incl_start: true,
-                    incl_end: false,
-                }
-            )
-        )
-    };
-    ( FloatRange { =($min:expr, $max:expr)= } ) => {
-        $crate::config::ConfigSpecItem::Value(
-            $crate::config::Verifier::ValueVer(
-                $crate::config::ValueVer::FloatRange {
-                    min: $min,
-                    max: $max,
-                    incl_start: true,
-                    incl_end: true,
-                }
-            )
-        )
-    };
-    ( Table { $( $key:literal => $val:expr ),* $(,)? } ) => {
-        $crate::config::ConfigSpecItem::Table(
-            $crate::config::ConfigSpec::from_iter([
-                $(
-                    ($key.to_string(), $val)
-                ),*
-            ])
-        )
-    };
-    ( StrColl { $( $s:expr ),* $(,)? } ) => {
-        $crate::config::ConfigSpecItem::Value(
-            $crate::config::Verifier::ValueVer(
-                $crate::config::ValueVer::StrColl(
-                    std::collections::HashSet::from_iter([
-                        $( $s.to_string() ),*
-                    ])
-                )
-            )
-        )
-    };
-}
-
-/// Sugared [`std::collections::HashMap`] representing a specification for the
-/// values and structure of a TOML-formatted config file.
+/// Sugared [`HashMap`] representing a specification for the values and
+/// structure of a formatted config file.
 #[derive(Clone, Debug)]
-pub struct ConfigSpec {
-    spec: HashMap<String, ConfigSpecItem>
+pub struct ConfigSpec<U, V>
+where U: ValueVerifier<V>
+{
+    spec: HashMap<String, ConfigSpecItem<U, V>>,
+    config_values: std::marker::PhantomData<V>,
 }
 
-impl AsRef<HashMap<String, ConfigSpecItem>> for ConfigSpec {
-    fn as_ref(&self) -> &HashMap<String, ConfigSpecItem> { &self.spec }
-}
-
-impl AsMut<HashMap<String, ConfigSpecItem>> for ConfigSpec {
-    fn as_mut(&mut self) -> &mut HashMap<String, ConfigSpecItem> {
-        return &mut self.spec;
-    }
-}
-
-impl Deref for ConfigSpec {
-    type Target = HashMap<String, ConfigSpecItem>;
-
-    fn deref(&self) -> &Self::Target { &self.spec }
-}
-
-impl DerefMut for ConfigSpec {
-    fn deref_mut(&mut self) -> &mut Self::Target {
-        return &mut self.spec;
-    }
-}
-
-impl From<HashMap<String, ConfigSpecItem>> for ConfigSpec {
-    fn from(spec: HashMap<String, ConfigSpecItem>) -> Self { Self { spec } }
-}
-
-impl FromIterator<(String, ConfigSpecItem)> for ConfigSpec {
+impl<U, V> FromIterator<(String, ConfigSpecItem<U, V>)> for ConfigSpec<U, V>
+where U: ValueVerifier<V>
+{
     fn from_iter<I>(iter: I) -> Self
-    where I: IntoIterator<Item = (String, ConfigSpecItem)>
+    where I: IntoIterator<Item = (String, ConfigSpecItem<U, V>)>
     {
-        return Self { spec: iter.into_iter().collect() };
+        Self {
+            spec: iter.into_iter().collect(),
+            config_values: std::marker::PhantomData,
+        }
     }
 }
 
-/// Create a [`ConfigSpec`].
-///
-/// Expects `str` literals for keys and [`ConfigSpecItem`]s for values. See also
-/// [`spec`].
-#[macro_export]
-macro_rules! config_spec {
-    ( $( $key:literal => $val:expr ),* $(,)? ) => {
-        $crate::config::ConfigSpec::from_iter([
-            $(
-                ($key.to_string(), $val)
-            ),*
-        ])
+impl<U, V> Default for ConfigSpec<U, V>
+where U: ValueVerifier<V>
+{
+    fn default() -> Self {
+        Self { spec: HashMap::new(), config_values: std::marker::PhantomData }
     }
 }
 
-impl ConfigSpec {
-    pub fn from_spec(spec: HashMap<String, ConfigSpecItem>) -> Self {
-        return Self { spec };
-    }
+impl<U, V> ConfigSpec<U, V>
+where U: ValueVerifier<V>
+{
+    /// Create a new, empty config specification.
+    pub fn new() -> Self { Self::default() }
+}
 
-    fn verify_ok(&self, value: Value) -> ConfigResult<Value> {
+impl<U, V> AsRef<HashMap<String, ConfigSpecItem<U, V>>> for ConfigSpec<U, V>
+where U: ValueVerifier<V>
+{
+    fn as_ref(&self) -> &HashMap<String, ConfigSpecItem<U, V>> { &self.spec }
+}
+
+impl<U, V> AsMut<HashMap<String, ConfigSpecItem<U, V>>> for ConfigSpec<U, V>
+where U: ValueVerifier<V>
+{
+    fn as_mut(&mut self) -> &mut HashMap<String, ConfigSpecItem<U, V>> {
+        &mut self.spec
+    }
+}
+
+/// Represents a set of constraints on the values and structure of a config.
+pub trait ConfigVerifier<V> {
+    /// Error type.
+    type Error;
+
+    /// Output verified record type.
+    type Record;
+
+    /// Verify a config-level value, consuming and re-returning if it passes
+    /// inspection.
+    fn verify(&self, value: V) -> Result<V, Self::Error>;
+
+    /// Verify a value and convert to a permanent type.
+    fn verify_into(&self, value: V) -> Result<Self::Record, Self::Error>;
+}
+
+impl ConfigVerifier<toml::Value> for ConfigSpec<Verifier, toml::Value> {
+    type Error = ConfigError;
+    type Record = Config<toml::Table, toml::Value>;
+
+    fn verify(&self, value: toml::Value) -> ConfigResult<toml::Value> {
+        use toml::Value;
+
         if let Value::Table(mut tab) = value {
-            let mut data = Table::new();
+            let mut data = toml::Table::new();
             let mut val: Value;
             let mut valstr: String;
             for (key, spec_item) in self.spec.iter() {
                 val = match (spec_item, tab.remove(key)) {
-                    (ConfigSpecItem::Table(spec_table), Some(v)) => {
-                        spec_table.verify_ok(v)
+                    (ConfigSpecItem::Table(subspec), Some(v)) => {
+                        subspec.verify(v)
                     },
-                    (ConfigSpecItem::Value(verifier), Some(v)) => {
-                        match verifier {
-                            Verifier::TypeVer(type_ver) => {
-                                valstr = v.to_string();
-                                type_ver.verify_ok_or(
-                                    v,
-                                    ConfigError::InvalidType(
-                                        key.clone(),
-                                        type_ver.to_string(),
-                                        valstr,
-                                    )
-                                )
-                            },
-                            Verifier::ValueVer(value_ver) => {
-                                valstr = v.to_string();
-                                value_ver.verify_ok_or(
-                                    v,
-                                    ConfigError::InvalidValue(
-                                        key.clone(),
-                                        value_ver.to_string(),
-                                        valstr,
-                                    )
-                                )
-                            },
-                        }
+                    (ConfigSpecItem::Value(ver), Some(v)) => {
+                        valstr = v.to_string();
+                        ver.verify_ok_or(
+                            v,
+                            ConfigError::InvalidValue(
+                                key.clone(),
+                                ver.to_string(),
+                                valstr,
+                            )
+                        )
                     },
                     _ => Err(ConfigError::MissingKey(key.clone())),
                 }?;
                 data.insert(key.clone(), val);
             }
-            return Ok(Value::Table(data));
+            Ok(Value::Table(data))
         } else {
-            return Err(ConfigError::IncompatibleStructure);
+            Err(ConfigError::IncompatibleStructure)
         }
     }
 
-    /// Return `Ok` if `table` matches `self`, `Err` otherwise.
-    ///
-    /// The keys of `table` are filtered to contain only those in the
-    /// specification.
-    pub fn verify(&self, table: Table) -> ConfigResult<Config> {
-        let data: Table
-            = self.verify_ok(Value::Table(table))?
-            .try_into()
-            .unwrap();
-        return Ok(Config { data });
+    fn verify_into(&self, value: toml::Value) -> ConfigResult<Self::Record> {
+        self.verify(value)
+            .map(|v| Config { data: v.try_into().unwrap() })
     }
 }
 
-/// Sugared [`toml::Table`] holding verified configuration values.
-#[derive(Clone, Debug)]
-pub struct Config {
-    data: Table
-}
+pub type JsonObject = json::Map<String, json::Value>;
 
-impl AsRef<Table> for Config {
-    fn as_ref(&self) -> &Table { &self.data }
-}
+impl ConfigVerifier<json::Value> for ConfigSpec<Verifier, json::Value> {
+    type Error = ConfigError;
+    type Record = Config<JsonObject, json::Value>;
 
-impl Deref for Config {
-    type Target = Table;
+    fn verify(&self, value: json::Value) -> ConfigResult<json::Value> {
+        use json::Value;
 
-    fn deref(&self) -> &Self::Target { &self.data }
-}
-
-impl Config {
-    /// Convert `self` into a [`ConfigUnver`]. This is necessary for mutation.
-    pub fn into_unver(self) -> ConfigUnver { ConfigUnver { data: self.data } }
-
-    /// Serialize `self` as a TOML-formatted string.
-    pub fn as_toml_string(&self) -> ConfigResult<String> {
-        return Ok(toml::to_string(&self.data)?);
-    }
-
-    /// Serialize `self` as a TOML-formatted 'pretty' string.
-    pub fn as_toml_string_pretty(&self) -> ConfigResult<String> {
-        return Ok(toml::to_string_pretty(&self.data)?);
-    }
-
-    /// Serialize `self` as a TOML-formatted string and write it to a file.
-    pub fn write_toml<P>(&self, outfile: P, create: bool, append: bool)
-        -> ConfigResult<()>
-    where P: AsRef<Path>
-    {
-        let outfile_string: String
-            = outfile.as_ref().display().to_string();
-        let mut out
-            = fs::File::options()
-            .write(true)
-            .create(create)
-            .truncate(!append)
-            .append(append)
-            .open(outfile)
-            .map_err(|e| {
-                ConfigError::FileOpen(outfile_string.clone(), e.to_string())
-            })?;
-        write!(&mut out, "{}", self.as_toml_string()?)
-            .map_err(|e| {
-                ConfigError::FileWrite(outfile_string.clone(), e.to_string())
-            })?;
-        return Ok(());
-    }
-
-    /// Serialize `self` as a TOML-formatted 'pretty' string and write it to a
-    /// file.
-    pub fn write_toml_pretty<P>(&self, outfile: P, create: bool, append: bool)
-        -> ConfigResult<()>
-    where P: AsRef<Path>
-    {
-        let outfile_string: String
-            = outfile.as_ref().display().to_string();
-        let mut out
-            = fs::File::options()
-            .write(true)
-            .create(create)
-            .truncate(!append)
-            .append(append)
-            .open(outfile)
-            .map_err(|e| {
-                ConfigError::FileOpen(outfile_string.clone(), e.to_string())
-            })?;
-        write!(&mut out, "{}", self.as_toml_string_pretty()?)
-            .map_err(|e| {
-                ConfigError::FileWrite(outfile_string.clone(), e.to_string())
-            })?;
-        return Ok(());
-    }
-
-    /// Create a new [`Config`] with verification against [`spec`].
-    pub fn new(data: Table, spec: &ConfigSpec) -> ConfigResult<Self> {
-        return spec.verify(data);
-    }
-
-    /// Read a TOML file into a new [`Config`] with verification against
-    /// [`spec`].
-    pub fn from_file<P>(infile: P, verify: &ConfigSpec) -> ConfigResult<Self>
-    where P: AsRef<Path>
-    {
-        let infile_str: String = infile.as_ref().display().to_string();
-        let table: Table
-            = fs::read_to_string(infile)
-            .map_err(|_| ConfigError::FileRead(infile_str.clone()))?
-            .parse()
-            .map_err(|_| ConfigError::FileParse(infile_str.clone()))?;
-        return verify.verify(table);
-    }
-
-    fn table_get_path<'a, K>(table: &Table, mut keys: Peekable<K>)
-        -> Option<&Value>
-    where K: Iterator<Item = &'a str>
-    {
-        return if let Some(key) = keys.next() {
-            match (table.get(key), keys.peek()) {
-                (Some(Value::Table(tab)), Some(_)) => {
-                    Self::table_get_path(tab, keys)
-                },
-                (x, None) => x,
-                (Some(_), Some(_)) => None,
-                (None, _) => None,
+        if let Value::Object(mut obj) = value {
+            let mut data: json::Map<String, Value> = json::Map::new();
+            let mut val: Value;
+            let mut valstr: String;
+            for (key, spec_item) in self.spec.iter() {
+                val = match (spec_item, obj.remove(key)) {
+                    (ConfigSpecItem::Table(subspec), Some(v)) => {
+                        subspec.verify(v)
+                    },
+                    (ConfigSpecItem::Value(ver), Some(v)) => {
+                        valstr = v.to_string();
+                        ver.verify_ok_or(
+                            v,
+                            ConfigError::InvalidValue(
+                                key.clone(),
+                                ver.to_string(),
+                                valstr,
+                            )
+                        )
+                    },
+                    _ => Err(ConfigError::MissingKey(key.clone())),
+                }?;
+                data.insert(key.clone(), val);
             }
+            Ok(Value::Object(data))
         } else {
-            None
-        };
+            Err(ConfigError::IncompatibleStructure)
+        }
     }
 
-    /// Access a key path in `self`, returning `Some` if the complete path
-    /// exists, `None` otherwise.
-    pub fn get_path<'a, K>(&self, keys: K) -> Option<&Value>
-    where K: IntoIterator<Item = &'a str>
-    {
-        return Self::table_get_path(&self.data, keys.into_iter().peekable());
+    fn verify_into(&self, value: json::Value) -> ConfigResult<Self::Record> {
+        self.verify(value)
+            .map(|v| {
+                let json::Value::Object(obj) = v else { unreachable!() };
+                Config { data: obj }
+            })
     }
+}
 
-    /// Access a key path in `self` where the individual keys in the path are
-    /// separated by `'.'`. Returns `Some` if the complete path exists, `None`
-    /// otherwise.
-    pub fn get(&self, keys: &str) -> Option<&Value> {
-        return self.get_path(keys.split('.'));
-    }
+impl ConfigVerifier<yaml::Value> for ConfigSpec<Verifier, yaml::Value> {
+    type Error = ConfigError;
+    type Record = Config<yaml::Mapping, yaml::Value>;
 
-    /// Access a key path in `self` and attempt to convert its type to `T`,
-    /// returning `Some(T)` if the complete path exists and the type is
-    /// convertible, `None` otherwise.
-    pub fn get_path_into<'a, 'de, K, T>(&self, keys: K) -> Option<T>
-    where
-        T: Deserialize<'de>,
-        K: IntoIterator<Item = &'a str>,
-    {
-        return match self.get_path(keys) {
-            Some(x) => x.clone().try_into().ok(),
-            None => None,
-        };
-    }
+    fn verify(&self, value: yaml::Value) -> ConfigResult<yaml::Value> {
+        use yaml::Value;
 
-    /// Access a key path in `self`, where individual keys in the path are
-    /// separated by `'.'`, and attempt to convert its type to `T`, returning
-    /// `Some(T)` if the complete path exists and the type is convertible,
-    /// `None` otherwise.
-    pub fn get_into<'de, T>(&self, keys: &str) -> Option<T>
-    where T: Deserialize<'de>
-    {
-        return match self.get(keys) {
-            Some(x) => x.clone().try_into().ok(),
-            None => None,
-        };
-    }
-
-    fn table_get_path_ok<'a, K>(table: &Table, mut keys: Peekable<K>)
-        -> ConfigResult<&Value>
-    where K: Iterator<Item = &'a str>
-    {
-        return if let Some(key) = keys.next() {
-            match (table.get(key), keys.peek()) {
-                (Some(Value::Table(tab)), Some(_)) => {
-                    Self::table_get_path_ok(tab, keys)
-                },
-                (x, None) => {
-                    x.ok_or_else(|| ConfigError::MissingKey(key.to_string()))
-                },
-                (Some(_), Some(k))
-                    => Err(ConfigError::KeyPathTooLong(k.to_string())),
-                (None, _) => Err(ConfigError::MissingKey(key.to_string())),
+        if let Value::Mapping(mut map) = value {
+            let mut data = yaml::Mapping::new();
+            let mut val: Value;
+            let mut valstr: String;
+            for (key, spec_item) in self.spec.iter() {
+                val = match (spec_item, map.remove(key)) {
+                    (ConfigSpecItem::Table(subspec), Some(v)) => {
+                        subspec.verify(v)
+                    },
+                    (ConfigSpecItem::Value(ver), Some(v)) => {
+                        valstr = format!("{:?}", v);
+                        ver.verify_ok_or(
+                            v,
+                            ConfigError::InvalidValue(
+                                key.clone(),
+                                ver.to_string(),
+                                valstr,
+                            )
+                        )
+                    },
+                    _ => Err(ConfigError::MissingKey(key.clone())),
+                }?;
+                data.insert(key.clone().into(), val);
             }
+            Ok(Value::Mapping(data))
         } else {
-            unreachable!()
-        };
+            Err(ConfigError::IncompatibleStructure)
+        }
     }
 
-    /// Access a key path in `self`, returning `Ok` if the complete path
-    /// exists, `Err` otherwise.
-    pub fn get_path_ok<'a, K>(&self, keys: K) -> ConfigResult<&Value>
-    where K: IntoIterator<Item = &'a str>
-    {
-        return Self::table_get_path_ok(&self.data, keys.into_iter().peekable());
+    fn verify_into(&self, value: yaml::Value) -> ConfigResult<Self::Record> {
+        self.verify(value)
+            .map(|v| {
+                let yaml::Value::Mapping(map) = v else { unreachable!() };
+                Config { data: map }
+            })
     }
-
-    /// Access a key path in `self` where the individual keys in the path are
-    /// separated by `'.'`. Returns `Ok` if the complete path exists, `Err`
-    /// otherwise.
-    pub fn get_ok(&self, keys: &str) -> ConfigResult<&Value> {
-        return self.get_path_ok(keys.split('.'));
-    }
-
-    /// Access a key path in `self` and attempt to convert its type to `T`,
-    /// returning `Ok(T)` if the complete path exists and the type is
-    /// convertible, `Err` otherwise.
-    pub fn get_path_ok_into<'a, 'de, K, T>(&self, keys: K) -> ConfigResult<T>
-    where
-        T: Deserialize<'de>,
-        K: IntoIterator<Item = &'a str>,
-    {
-        return self.get_path_ok(keys)
-            .and_then(|x| {
-                x.clone()
-                    .try_into()
-                    .map_err(|_| {
-                        ConfigError::FailedTypeConversion(x.to_string())
-                    })
-            });
-    }
-
-    /// Access a key path in `self`, where individual keys in the path are
-    /// separated by `'.'`, and attempt to convert its type to `T`, returning
-    /// `Ok(T)` if the complete path exists and the type is convertible, `Err`
-    /// otherwise.
-    pub fn get_ok_into<'de, T>(&self, keys: &str) -> ConfigResult<T>
-    where T: Deserialize<'de>
-    {
-        return self.get_ok(keys)
-            .and_then(|x| {
-                x.clone()
-                    .try_into()
-                    .map_err(|_| {
-                        ConfigError::FailedTypeConversion(x.to_string())
-                    })
-            });
-    }
-
-    /// Alias for [`Self::get_ok_into`].
-    pub fn a<'de, T>(&self, keys: &str) -> ConfigResult<T>
-    where T: Deserialize<'de>
-    {
-        return self.get_ok_into(keys);
-    }
-
-    /// Convert `self` to a bare [`Table`].
-    pub fn into_table(self) -> Table { self.data }
 }
 
-impl From<Config> for Table {
-    fn from(config: Config) -> Self { config.data }
-}
-
-impl From<Config> for ConfigUnver {
-    fn from(config: Config) -> Self { Self { data: config.data } }
-}
-
-/// Sugared [`toml::Table`] holding unverified configuration values.
-#[derive(Clone, Debug)]
-pub struct ConfigUnver {
-    data: Table
-}
-
-impl AsRef<Table> for ConfigUnver {
-    fn as_ref(&self) -> &Table { &self.data }
-}
-
-impl AsMut<Table> for ConfigUnver {
-    fn as_mut(&mut self) -> &mut Table { &mut self.data }
-}
-
-impl Deref for ConfigUnver {
-    type Target = Table;
-
-    fn deref(&self) -> &Self::Target { &self.data }
-}
-
-impl DerefMut for ConfigUnver {
-    fn deref_mut(&mut self) -> &mut Self::Target { &mut self.data }
-}
-
-impl Default for ConfigUnver {
-    fn default() -> Self { Self::new() }
-}
-
-impl ConfigUnver {
-    /// Serialize `self` as a TOML-formatted string.
-    pub fn as_toml_string(&self) -> ConfigResult<String> {
-        return Ok(toml::to_string(&self.data)?);
-    }
-
-    /// Serialize `self` as a TOML-formatted 'pretty' string.
-    pub fn as_toml_string_pretty(&self) -> ConfigResult<String> {
-        return Ok(toml::to_string_pretty(&self.data)?);
-    }
-
-    /// Serialize `self` as a TOML-formatted string and write it to a file.
-    pub fn write_toml<P>(&self, outfile: P, create: bool, append: bool)
-        -> ConfigResult<()>
-    where P: AsRef<Path>
-    {
-        let outfile_string: String
-            = outfile.as_ref().display().to_string();
-        let mut out
-            = fs::File::options()
-            .write(true)
-            .create(create)
-            .truncate(!append)
-            .append(append)
-            .open(outfile)
-            .map_err(|e| {
-                ConfigError::FileOpen(outfile_string.clone(), e.to_string())
-            })?;
-        write!(&mut out, "{}", self.as_toml_string()?)
-            .map_err(|e| {
-                ConfigError::FileWrite(outfile_string.clone(), e.to_string())
-            })?;
-        return Ok(());
-    }
-
-    /// Serialize `self` as a TOML-formatted 'pretty' string and write it to a
-    /// file.
-    pub fn write_toml_pretty<P>(&self, outfile: P, create: bool, append: bool)
-        -> ConfigResult<()>
-    where P: AsRef<Path>
-    {
-        let outfile_string: String
-            = outfile.as_ref().display().to_string();
-        let mut out
-            = fs::File::options()
-            .write(true)
-            .create(create)
-            .truncate(!append)
-            .append(append)
-            .open(outfile)
-            .map_err(|e| {
-                ConfigError::FileOpen(outfile_string.clone(), e.to_string())
-            })?;
-        write!(&mut out, "{}", self.as_toml_string_pretty()?)
-            .map_err(|e| {
-                ConfigError::FileWrite(outfile_string.clone(), e.to_string())
-            })?;
-        return Ok(());
-    }
-
-    /// Create a new, empty [`ConfigUnver`].
-    pub fn new() -> Self { Self { data: Table::new() } }
-
-    /// Convert to a [`Config`] by verifying against `spec`.
-    pub fn into_verified(self, spec: &ConfigSpec) -> ConfigResult<Config> {
-        return spec.verify(self.data);
-    }
-
-    /// Read a TOML file into a new [`ConfigUnver`]
-    pub fn from_file<P>(infile: P) -> ConfigResult<Self>
-    where P: AsRef<Path>
-    {
-        let infile_str: String = infile.as_ref().display().to_string();
-        let table: Table
-            = fs::read_to_string(infile)
-            .map_err(|_| ConfigError::FileRead(infile_str.clone()))?
-            .parse()
-            .map_err(|_| ConfigError::FileParse(infile_str.clone()))?;
-        return Ok(Self { data: table });
-    }
-
-    fn table_get_path<'a, K>(table: &Table, mut keys: Peekable<K>)
-        -> Option<&Value>
-    where K: Iterator<Item = &'a str>
-    {
-        return if let Some(key) = keys.next() {
-            match (table.get(key), keys.peek()) {
-                (Some(Value::Table(tab)), Some(_)) => {
-                    Self::table_get_path(tab, keys)
-                },
-                (x, None) => x,
-                (Some(_), Some(_)) => None,
-                (None, _) => None,
-            }
-        } else {
-            None
-        };
-    }
-
-    /// Access a key path in `self`, returning `Some` if the complete path
-    /// exists, `None` otherwise.
-    pub fn get_path<'a, K>(&self, keys: K) -> Option<&Value>
-    where K: IntoIterator<Item = &'a str>
-    {
-        return Self::table_get_path(&self.data, keys.into_iter().peekable());
-    }
-
-    /// Access a key path in `self` where the individual keys in the path are
-    /// separated by `'.'`. Returns `Some` if the complete path exists, `None`
-    /// otherwise.
-    pub fn get(&self, keys: &str) -> Option<&Value> {
-        return self.get_path(keys.split('.'));
-    }
-
-    /// Access a key path in `self` and attempt to convert its type to `T`,
-    /// returning `Some(T)` if the complete path exists and the type is
-    /// convertible, `None` otherwise.
-    pub fn get_path_into<'a, 'de, K, T>(&self, keys: K) -> Option<T>
-    where
-        T: Deserialize<'de>,
-        K: IntoIterator<Item = &'a str>,
-    {
-        return match self.get_path(keys) {
-            Some(x) => x.clone().try_into().ok(),
-            None => None,
-        };
-    }
-
-    /// Access a key path in `self`, where individual keys in the path are
-    /// separated by `'.'`, and attempt to convert its type to `T`, returning
-    /// `Some(T)` if the complete path exists and the type is convertible,
-    /// `None` otherwise.
-    pub fn get_into<'de, T>(&self, keys: &str) -> Option<T>
-    where T: Deserialize<'de>
-    {
-        return match self.get(keys) {
-            Some(x) => x.clone().try_into().ok(),
-            None => None,
-        };
-    }
-
-    fn table_get_path_ok<'a, K>(table: &Table, mut keys: Peekable<K>)
-        -> ConfigResult<&Value>
-    where K: Iterator<Item = &'a str>
-    {
-        return if let Some(key) = keys.next() {
-            match (table.get(key), keys.peek()) {
-                (Some(Value::Table(tab)), Some(_)) => {
-                    Self::table_get_path_ok(tab, keys)
-                },
-                (x, None) => {
-                    x.ok_or_else(|| ConfigError::MissingKey(key.to_string()))
-                },
-                (Some(_), Some(k))
-                    => Err(ConfigError::KeyPathTooLong(k.to_string())),
-                (None, _) => Err(ConfigError::MissingKey(key.to_string())),
-            }
-        } else {
-            unreachable!()
-        };
-    }
-
-    /// Access a key path in `self`, returning `Ok` if the complete path
-    /// exists, `Err` otherwise.
-    pub fn get_path_ok<'a, K>(&self, keys: K) -> ConfigResult<&Value>
-    where K: IntoIterator<Item = &'a str>
-    {
-        return Self::table_get_path_ok(&self.data, keys.into_iter().peekable());
-    }
-
-    /// Access a key path in `self` where the individual keys in the path are
-    /// separated by `'.'`. Returns `Ok` if the complete path exists, `Err`
-    /// otherwise.
-    pub fn get_ok(&self, keys: &str) -> ConfigResult<&Value> {
-        return self.get_path_ok(keys.split('.'));
-    }
-
-    /// Access a key path in `self` and attempt to convert its type to `T`,
-    /// returning `Ok(T)` if the complete path exists and the type is
-    /// convertible, `Err` otherwise.
-    pub fn get_path_ok_into<'a, 'de, K, T>(&self, keys: K) -> ConfigResult<T>
-    where
-        T: Deserialize<'de>,
-        K: IntoIterator<Item = &'a str>,
-    {
-        return self.get_path_ok(keys)
-            .and_then(|x| {
-                x.clone()
-                    .try_into()
-                    .map_err(|_| {
-                        ConfigError::FailedTypeConversion(x.to_string())
-                    })
-            });
-    }
-
-    /// Access a key path in `self`, where individual keys in the path are
-    /// separated by `'.'`, and attempt to convert its type to `T`, returning
-    /// `Ok(T)` if the complete path exists and the type is convertible, `Err`
-    /// otherwise.
-    pub fn get_ok_into<'de, T>(&self, keys: &str) -> ConfigResult<T>
-    where T: Deserialize<'de>
-    {
-        return self.get_ok(keys)
-            .and_then(|x| {
-                x.clone()
-                    .try_into()
-                    .map_err(|_| {
-                        ConfigError::FailedTypeConversion(x.to_string())
-                    })
-            });
-    }
-
-    /// Alias for [`Self::get_ok_into`].
-    pub fn a<'de, T>(&self, keys: &str) -> ConfigResult<T>
-    where T: Deserialize<'de>
-    {
-        return self.get_ok_into(keys);
-    }
-
-    /// Convert `self` to a bare [`Table`].
-    pub fn into_table(self) -> Table { self.data }
-}
-
-impl From<ConfigUnver> for Table {
-    fn from(config: ConfigUnver) -> Self { config.data }
-}
-
-pub extern crate toml;
-
-/// Define a simple function, `load_config` to read and process independent
-/// values from a table in a `.toml` file and return them as a `Config` struct.
-///
-/// Each value to be read is specified as a key (`&'static str`), a default
-/// value and its type, the name and type of the `Config` struct field it's
-/// stored under, and a closure to map the value read from the file (or the
-/// default) to the one stored in the struct. Can only be used once per
-/// namespace.
+/// Shorthand for creating [`ConfigSpec`]s and [`ConfigSpecItem`]s.
 #[macro_export]
-macro_rules! config_fn {
-    (
-        $subtab:expr => {
-            $( $key:expr, $def:expr, $intype:ty
-                => $field:ident : $outtype:ty = $foo:expr ),+ $(,)?
-        }
-    ) => {
-        #[derive(Clone, Debug)]
-        pub struct Config {
-            $(
-                pub $field: $outtype,
-            )+
-        }
-
-        pub fn load_config(infile: std::path::PathBuf) -> Config {
-            let infile: std::path::PathBuf
-                = infile.unwrap_or(std::path::PathBuf::from($file));
-            let table: $crate::config::toml::Value
-                = std::fs::read_to_string(infile.clone())
-                .expect(
-                    format!("Couldn't read config file {:?}", infile)
-                    .as_str()
-                )
-                .parse::<$crate::config::toml::Value>()
-                .expect(
-                    format!("Couldn't parse config file {:?}", infile)
-                    .as_str()
-                );
-            let mut config = Config {
-                $(
-                    $field: ($foo)($def),
-                )+
-            };
-            if let Some(value) = table.get($subtab) {
-                $(
-                    if let Some(X) = value.get($key) {
-                        let x: $intype
-                            = X.clone().try_into()
-                            .expect(format!(
-                                "Couldn't coerce type for key {:?}", $key)
-                                .as_str()
-                            );
-                        config.$field = ($foo)(x);
-                    }
-                )+
+macro_rules! confspec {
+    ( Null ) => {
+        $crate::config::ConfigSpecItem::Value(
+            $crate::config::Verifier::Null
+        )
+    };
+    ( Bool ) => {
+        $crate::config::ConfigSpecItem::Value(
+            $crate::config::Verifier::Bool
+        )
+    };
+    ( Int ) => {
+        $crate::config::ConfigSpecItem::Value(
+            $crate::config::Verifier::Int
+        )
+    };
+    ( IntRange { ( $min:expr, $max:expr ) } ) => {
+        $crate::config::ConfigSpecItem::Value(
+            $crate::config::Verifier::IntRange {
+                min: $min,
+                max: $max,
+                incl_min: false,
+                incl_max: false,
             }
-            return config;
-        }
+        )
+    };
+    ( IntRange { =( $min:expr, $max:expr ) } ) => {
+        $crate::config::ConfigSpecItem::Value(
+            $crate::config::Verifier::IntRange {
+                min: $min,
+                max: $max,
+                incl_min: true,
+                incl_max: false,
+            }
+        )
+    };
+    ( IntRange { ( $min:expr, $max:expr )= } ) => {
+        $crate::config::ConfigSpecItem::Value(
+            $crate::config::Verifier::IntRange {
+                min: $min,
+                max: $max,
+                incl_min: false,
+                incl_max: true,
+            }
+        )
+    };
+    ( IntRange { =( $min:expr, $max:expr )= } ) => {
+        $crate::config::ConfigSpecItem::Value(
+            $crate::config::Verifier::IntRange {
+                min: $min,
+                max: $max,
+                incl_min: true,
+                incl_max: true,
+            }
+        )
+    };
+    ( IntColl { $( $i:expr ),* $(,)? } ) => {
+        $crate::config::ConfigSpecItem::Value(
+            $crate::config::Verifier::IntColl(
+                std::collections::HashSet::from_iter([$( $i ),*])
+            )
+        )
+    };
+    ( Float ) => {
+        $crate::config::ConfigSpecItem::Value(
+            $crate::config::Verifier::Float
+        )
+    };
+    ( FloatRange { ( $min:expr, $max:expr ) } ) => {
+        $crate::config::ConfigSpecItem::Value(
+            $crate::config::Verifier::FloatRange {
+                min: $min,
+                max: $max,
+                incl_min: false,
+                incl_max: false,
+            }
+        )
+    };
+    ( FloatRange { =( $min:expr, $max:expr ) } ) => {
+        $crate::config::ConfigSpecItem::Value(
+            $crate::config::Verifier::FloatRange {
+                min: $min,
+                max: $max,
+                incl_min: true,
+                incl_max: false,
+            }
+        )
+    };
+    ( FloatRange { ( $min:expr, $max:expr )= } ) => {
+        $crate::config::ConfigSpecItem::Value(
+            $crate::config::Verifier::FloatRange {
+                min: $min,
+                max: $max,
+                incl_min: false,
+                incl_max: true,
+            }
+        )
+    };
+    ( FloatRange { =( $min:expr, $max:expr )= } ) => {
+        $crate::config::ConfigSpecItem::Value(
+            $crate::config::Verifier::FloatRange {
+                min: $min,
+                max: $max,
+                incl_min: true,
+                incl_max: true,
+            }
+        )
+    };
+    ( Number ) => {
+        $crate::config::ConfigSpecItem::Value(
+            $crate::config::Verifier::Number
+        )
+    };
+    ( Datetime ) => {
+        $crate::config::ConfigSpecItem::Value(
+            $crate::config::Verifier::Datetime
+        )
+    };
+    ( Array ) => {
+        $crate::config::ConfigSpecItem::Value(
+            $crate::config::Verifier::Array
+        )
+    };
+    ( ArrayForm { [ $( $form:expr ),* $(,)? ], finite: $f:expr $(,)? } ) => {
+        $crate::config::ConfigSpecItem::Value(
+            $crate::config::Verifier::ArrayForm {
+                forms: vec![ $( $form ),* ],
+                finite: $f,
+            }
+        )
+    };
+    ( Str ) => {
+        $crate::config::ConfigSpecItem::Value(
+            $crate::config::Verifier::Str
+        )
+    };
+    ( StrColl { $( $s:expr ),* $(,)? } ) => {
+        $crate::config::ConfigSpecItem::Value(
+            $crate::config::Verifier::StrColl(
+                std::collections::HashSet::from_iter([$( $s.to_string() ),*])
+            )
+        )
+    };
+    ( Table { $( $key:expr => $spec:expr ),* $(,)? } ) => {
+        $crate::config::ConfigSpecItem::Table(
+            $crate::config::ConfigSpec::from_iter([
+                $( ($key.to_string(), $spec) ),*
+            ])
+        )
+    };
+    ( Any ) => {
+        $crate::config::ConfigSpecItem::Value(
+            $crate::config::Verifier::Any
+        )
+    };
+    ( AnyTable ) => {
+        $crate::config::ConfigSpecItem::Value(
+            $crate::config::Verifier::AnyTable
+        )
+    };
+    ( { $( $key:expr => $spec:expr ),* $(,)? } ) => {
+        $crate::config::ConfigSpec::from_iter([
+            $( ($key.to_string(), $spec) ),*
+        ])
+    };
+}
+
+/// Convenience accessor/modifier methods on a nested map-like structure where
+/// string keys are mapped to `Self::Value`.
+///
+/// See [`toml::Table`]/[`toml::Value`] and [`json::Map`]/[`json::Value`] for
+/// examples.
+///
+/// Values accessed through these methods are done so using "key paths", which
+/// are either iterables of `&str` keys, each accessing a single nested level in
+/// the structure, or a single `&str` containing the items of the path
+/// deliminated by `Self::DELIM`.
+pub trait InternalRecord {
+    /// Record value type.
+    type Value;
+
+    /// Assumed key path deliminator.
+    const DELIM: char;
+
+    /// Get a reference to the value at the end of a key path, if it exists.
+    fn get_path<'a, K>(&self, keys: K) -> Option<&Self::Value>
+    where K: IntoIterator<Item = &'a str>;
+
+    /// Get a mutable reference to the value at the end of a key path, if it
+    /// exists.
+    fn get_mut_path<'a, K>(&mut self, keys: K) -> Option<&mut Self::Value>
+    where K: IntoIterator<Item = &'a str>;
+
+    /// Get a reference to the value at the end of a key path, if it exists.
+    fn get(&self, keypath: &str) -> Option<&Self::Value> {
+        self.get_path(keypath.split(Self::DELIM))
     }
+
+    /// Get a mutable reference to the value at the end of a key path, if it
+    /// exists.
+    fn get_mut(&mut self, keypath: &str) -> Option<&mut Self::Value> {
+        self.get_mut_path(keypath.split(Self::DELIM))
+    }
+
+    /// Insert a value at the end of a key path, returning the previous value at
+    /// that location if it existed.
+    fn insert_path<'a, K, T>(&mut self, keys: K, value: T)
+        -> Option<Self::Value>
+    where
+        K: IntoIterator<Item = &'a str>,
+        T: Into<Self::Value>;
+
+    /// Insert a value at the end of a key path, returning the previous value at
+    /// that location if it existed.
+    fn insert<T>(&mut self, keypath: &str, value: T) -> Option<Self::Value>
+    where T: Into<Self::Value>
+    {
+        self.insert_path(keypath.split(Self::DELIM), value)
+    }
+
+    /// Remove a value at the end of a key path if it existed.
+    fn remove_path<'a, K>(&mut self, keys: K) -> Option<Self::Value>
+    where K: IntoIterator<Item = &'a str>;
+
+    /// Remove a value at the end of a key path if it existed.
+    fn remove(&mut self, keypath: &str) -> Option<Self::Value> {
+        self.remove_path(keypath.split(Self::DELIM))
+    }
+}
+
+impl InternalRecord for toml::Table {
+    type Value = toml::Value;
+    const DELIM: char = '.';
+
+    fn get_path<'a, K>(&self, keys: K) -> Option<&Self::Value>
+    where K: IntoIterator<Item = &'a str>
+    {
+        fn table_get_path<'a, K>(
+            table: &toml::Table,
+            mut keys: Peekable<K>,
+        ) -> Option<&toml::Value>
+        where K: Iterator<Item = &'a str>
+        {
+            if let Some(key) = keys.next() {
+                match (table.get(key), keys.peek()) {
+                    (Some(toml::Value::Table(subtab)), Some(_)) => {
+                        table_get_path(subtab, keys)
+                    },
+                    (x, None) => x,
+                    (Some(_), Some(_)) => None,
+                    (None, _) => None,
+                }
+            } else {
+                None
+            }
+        }
+        table_get_path(self, keys.into_iter().peekable())
+    }
+
+    fn get_mut_path<'a, K>(&mut self, keys: K) -> Option<&mut Self::Value>
+    where K: IntoIterator<Item = &'a str>
+    {
+        fn table_get_mut_path<'a, K>(
+            table: &mut toml::Table,
+            mut keys: Peekable<K>,
+        ) -> Option<&mut toml::Value>
+        where K: Iterator<Item = &'a str>
+        {
+            if let Some(key) = keys.next() {
+                match (table.get_mut(key), keys.peek()) {
+                    (Some(toml::Value::Table(subtab)), Some(_)) => {
+                        table_get_mut_path(subtab, keys)
+                    },
+                    (x, None) => x,
+                    (Some(_), Some(_)) => None,
+                    (None, _) => None,
+                }
+            } else {
+                None
+            }
+        }
+        table_get_mut_path(self, keys.into_iter().peekable())
+    }
+
+    /// This method panics if the user tries to `insert` a value at the end of a
+    /// path containing a non-table value anywhere before its end.
+    fn insert_path<'a, K, T>(&mut self, keys: K, value: T)
+        -> Option<Self::Value>
+    where
+        K: IntoIterator<Item = &'a str>,
+        T: Into<Self::Value>,
+    {
+        fn table_insert_path<'a, K, T>(
+            table: &mut toml::Table,
+            mut keys: Peekable<K>,
+            value: T,
+        ) -> Option<toml::Value>
+        where
+            K: Iterator<Item = &'a str>,
+            T: Into<toml::Value>,
+        {
+            if let Some(key) = keys.next() {
+                match (table.get_mut(key), keys.peek()) {
+                    (Some(toml::Value::Table(subtab)), Some(_)) => {
+                        table_insert_path(subtab, keys, value)
+                    },
+                    (None, Some(_)) => {
+                        table.insert(
+                            key.to_string(), toml::Table::new().into());
+                        table_insert_path(
+                            table.get_mut(key).unwrap()
+                                .as_table_mut().unwrap(),
+                            keys,
+                            value,
+                        )
+                    },
+                    (Some(x), None) => {
+                        Some(std::mem::replace(x, value.into()))
+                    },
+                    (None, None) => {
+                        table.insert(key.to_string(), value.into())
+                    },
+                    (Some(_), Some(_)) => {
+                        panic!(
+                            "InternalRecord for toml::Table: encountered \
+                            non-empty values in the middle of a path insertion"
+                        );
+                    },
+                }
+            } else {
+                None
+            }
+        }
+        table_insert_path(self, keys.into_iter().peekable(), value)
+    }
+
+    fn remove_path<'a, K>(&mut self, keys: K) -> Option<Self::Value>
+    where K: IntoIterator<Item = &'a str>
+    {
+        fn table_remove_path<'a, K>(
+            table: &mut toml::Table,
+            mut keys: Peekable<K>,
+        ) -> Option<toml::Value>
+        where K: Iterator<Item = &'a str>
+        {
+            if let Some(key) = keys.next() {
+                match (table.get_mut(key), keys.peek()) {
+                    (Some(toml::Value::Table(subtab)), Some(_)) => {
+                        table_remove_path(subtab, keys)
+                    },
+                    (_, None) => table.remove(key),
+                    (Some(_), Some(_)) => None,
+                    (None, _) => None,
+                }
+            } else {
+                None
+            }
+        }
+        table_remove_path(self, keys.into_iter().peekable())
+    }
+}
+
+impl InternalRecord for json::Map<String, json::Value> {
+    type Value = json::Value;
+    const DELIM: char = '.';
+
+    fn get_path<'a, K>(&self, keys: K) -> Option<&Self::Value>
+    where K: IntoIterator<Item = &'a str>
+    {
+        fn object_get_path<'a, K>(
+            object: &JsonObject,
+            mut keys: Peekable<K>,
+        ) -> Option<&json::Value>
+        where K: Iterator<Item = &'a str>
+        {
+            if let Some(key) = keys.next() {
+                match (object.get(key), keys.peek()) {
+                    (Some(json::Value::Object(subobj)), Some(_)) => {
+                        object_get_path(subobj, keys)
+                    },
+                    (x, None) => x,
+                    (Some(_), Some(_)) => None,
+                    (None, _) => None,
+                }
+            } else {
+                None
+            }
+        }
+        object_get_path(self, keys.into_iter().peekable())
+    }
+
+    fn get_mut_path<'a, K>(&mut self, keys: K) -> Option<&mut Self::Value>
+    where K: IntoIterator<Item = &'a str>
+    {
+        fn object_get_mut_path<'a, K>(
+            object: &mut JsonObject,
+            mut keys: Peekable<K>,
+        ) -> Option<&mut json::Value>
+        where K: Iterator<Item = &'a str>
+        {
+            if let Some(key) = keys.next() {
+                match (object.get_mut(key), keys.peek()) {
+                    (Some(json::Value::Object(subobj)), Some(_)) => {
+                        object_get_mut_path(subobj, keys)
+                    },
+                    (x, None) => x,
+                    (Some(_), Some(_)) => None,
+                    (None, _) => None,
+                }
+            } else {
+                None
+            }
+        }
+        object_get_mut_path(self, keys.into_iter().peekable())
+    }
+
+    /// This method panics if the user tries to `insert` a value at the end of a
+    /// path containing a non-table value anywhere before its end.
+    fn insert_path<'a, K, T>(&mut self, keys: K, value: T)
+        -> Option<Self::Value>
+    where
+        K: IntoIterator<Item = &'a str>,
+        T: Into<Self::Value>,
+    {
+        fn object_insert_path<'a, K, T>(
+            object: &mut JsonObject,
+            mut keys: Peekable<K>,
+            value: T,
+        ) -> Option<json::Value>
+        where
+            K: Iterator<Item = &'a str>,
+            T: Into<json::Value>,
+        {
+            if let Some(key) = keys.next() {
+                match (object.get_mut(key), keys.peek()) {
+                    (Some(json::Value::Object(subobj)), Some(_)) => {
+                        object_insert_path(subobj, keys, value)
+                    },
+                    (None, Some(_)) => {
+                        object.insert(
+                            key.to_string(), JsonObject::new().into());
+                        object_insert_path(
+                            object.get_mut(key).unwrap()
+                                .as_object_mut().unwrap(),
+                            keys,
+                            value,
+                        )
+                    },
+                    (Some(x), None) => {
+                        Some(std::mem::replace(x, value.into()))
+                    },
+                    (None, None) => {
+                        object.insert(key.to_string(), value.into())
+                    },
+                    (Some(_), Some(_)) => {
+                        panic!(
+                            "InternalRecord for json::Map: encountered \
+                            non-empty values in the middle of a path insertion"
+                        );
+                    },
+                }
+            } else {
+                None
+            }
+        }
+        object_insert_path(self, keys.into_iter().peekable(), value)
+    }
+
+    fn remove_path<'a, K>(&mut self, keys: K) -> Option<Self::Value>
+    where K: IntoIterator<Item = &'a str>
+    {
+        fn object_remove_path<'a, K>(
+            object: &mut JsonObject,
+            mut keys: Peekable<K>,
+        ) -> Option<json::Value>
+        where K: Iterator<Item = &'a str>
+        {
+            if let Some(key) = keys.next() {
+                match (object.get_mut(key), keys.peek()) {
+                    (Some(json::Value::Object(subobj)), Some(_)) => {
+                        object_remove_path(subobj, keys)
+                    },
+                    (_, None) => object.remove(key),
+                    (Some(_), Some(_)) => None,
+                    (None, _) => None,
+                }
+            } else {
+                None
+            }
+        }
+        object_remove_path(self, keys.into_iter().peekable())
+    }
+}
+
+#[allow(unused_variables)]
+impl InternalRecord for yaml::Mapping {
+    type Value = yaml::Value;
+    const DELIM: char = '.';
+
+    fn get_path<'a, K>(&self, keys: K) -> Option<&Self::Value>
+    where K: IntoIterator<Item = &'a str>
+    {
+        fn mapping_get_path<'a, K>(
+            mapping: &yaml::Mapping,
+            mut keys: Peekable<K>,
+        ) -> Option<&yaml::Value>
+        where K: Iterator<Item = &'a str>
+        {
+            if let Some(key) = keys.next() {
+                match (mapping.get(key), keys.peek()) {
+                    (Some(yaml::Value::Mapping(submap)), Some(_)) => {
+                        mapping_get_path(submap, keys)
+                    },
+                    (x, None) => x,
+                    (Some(_), Some(_)) => None,
+                    (None, _) => None,
+                }
+            } else {
+                None
+            }
+        }
+        mapping_get_path(self, keys.into_iter().peekable())
+    }
+
+    fn get_mut_path<'a, K>(&mut self, keys: K) -> Option<&mut Self::Value>
+    where K: IntoIterator<Item = &'a str>
+    {
+        fn mapping_get_mut_path<'a, K>(
+            mapping: &mut yaml::Mapping,
+            mut keys: Peekable<K>,
+        ) -> Option<&mut yaml::Value>
+        where K: Iterator<Item = &'a str>
+        {
+            if let Some(key) = keys.next() {
+                match (mapping.get_mut(key), keys.peek()) {
+                    (Some(yaml::Value::Mapping(submap)), Some(_)) => {
+                        mapping_get_mut_path(submap, keys)
+                    },
+                    (x, None) => x,
+                    (Some(_), Some(_)) => None,
+                    (None, _) => None,
+                }
+            } else {
+                None
+            }
+        }
+        mapping_get_mut_path(self, keys.into_iter().peekable())
+    }
+
+    /// This method panics if the user tries to `insert` a value at the end of a
+    /// path containing a non-table value anywhere before its end.
+    fn insert_path<'a, K, T>(&mut self, keys: K, value: T)
+        -> Option<Self::Value>
+    where
+        K: IntoIterator<Item = &'a str>,
+        T: Into<Self::Value>,
+    {
+        fn mapping_insert_path<'a, K, T>(
+            mapping: &mut yaml::Mapping,
+            mut keys: Peekable<K>,
+            value: T,
+        ) -> Option<yaml::Value>
+        where
+            K: Iterator<Item = &'a str>,
+            T: Into<yaml::Value>,
+        {
+            if let Some(key) = keys.next() {
+                match (mapping.get_mut(key), keys.peek()) {
+                    (Some(yaml::Value::Mapping(submap)), Some(_)) => {
+                        mapping_insert_path(submap, keys, value)
+                    },
+                    (None, Some(_)) => {
+                        mapping.insert(
+                            key.into(), yaml::Mapping::new().into());
+                        mapping_insert_path(
+                            mapping.get_mut(key).unwrap()
+                                .as_mapping_mut().unwrap(),
+                            keys,
+                            value,
+                        )
+                    },
+                    (Some(x), None) => {
+                        Some(std::mem::replace(x, value.into()))
+                    },
+                    (None, None) => {
+                        mapping.insert(key.into(), value.into())
+                    },
+                    (Some(_), Some(_)) => {
+                        panic!(
+                            "InternalRecord for yaml::Map: encountered \
+                            non-empty values in the middle of a path insertion"
+                        );
+                    },
+                }
+            } else {
+                None
+            }
+        }
+        mapping_insert_path(self, keys.into_iter().peekable(), value)
+    }
+
+    fn remove_path<'a, K>(&mut self, keys: K) -> Option<Self::Value>
+    where K: IntoIterator<Item = &'a str>
+    {
+        fn mapping_remove_path<'a, K>(
+            mapping: &mut yaml::Mapping,
+            mut keys: Peekable<K>,
+        ) -> Option<yaml::Value>
+        where K: Iterator<Item = &'a str>
+        {
+            if let Some(key) = keys.next() {
+                match (mapping.get_mut(key), keys.peek()) {
+                    (Some(yaml::Value::Mapping(submap)), Some(_)) => {
+                        mapping_remove_path(submap, keys)
+                    },
+                    (_, None) => mapping.remove(key),
+                    (Some(_), Some(_)) => None,
+                    (None, _) => None,
+                }
+            } else {
+                None
+            }
+        }
+        mapping_remove_path(self, keys.into_iter().peekable())
+    }
+}
+
+/// An immutable wrapper around a verified config `T` holding values of type
+/// `V`.
+///
+/// To mutate, first convert to a [`ConfigUnver`].
+///
+/// See also [`ConfigVerifier`].
+#[derive(Clone, Debug)]
+pub struct Config<T, V>
+where T: InternalRecord<Value = V>
+{
+    data: T,
+}
+
+impl<T, V> AsRef<T> for Config<T, V>
+where T: InternalRecord<Value = V>
+{
+    fn as_ref(&self) -> &T { &self.data }
+}
+
+impl<T, V> Config<T, V>
+where T: InternalRecord<Value = V>
+{
+    /// Load config values from a file.
+    pub fn from_file<P, C>(infile: P, verifier: &C) -> ConfigResult<Self>
+    where
+        V: FromStr,
+        P: AsRef<Path>,
+        C: ConfigVerifier<V, Record = Self, Error = ConfigError>,
+    {
+        let infile_str: String = infile.as_ref().display().to_string();
+        let value: V
+            = fs::read_to_string(infile)
+            .map_err(|_| ConfigError::FileRead(infile_str.clone()))?
+            .parse()
+            .map_err(|_| ConfigError::FileParse(infile_str.clone()))?;
+        verifier.verify_into(value)
+    }
+
+    /// Load config values from a string.
+    pub fn from_str<C, U>(s: &str, verifier: &C) -> ConfigResult<Self>
+    where
+        U: FromStr,
+        C: ConfigVerifier<U, Record = Self, Error = ConfigError>,
+    {
+        let value: U = s.parse().map_err(|_| ConfigError::StrParse)?;
+        verifier.verify_into(value)
+    }
+
+    /// Wrap an underlying record type.
+    pub fn from_data<C, U>(data: T, verifier: &C) -> ConfigResult<Self>
+    where
+        C: ConfigVerifier<U, Record = Self, Error = ConfigError>,
+        T: Into<U>,
+    {
+        verifier.verify_into(data.into())
+    }
+
+    /// Convert to an unverified wrapper.
+    pub fn into_unver(self) -> ConfigUnver<T, V> {
+        let Self { data } = self;
+        ConfigUnver { data }
+    }
+
+    /// Convert from an unverified wrapper.
+    pub fn from_unver<C, U>(unver: ConfigUnver<T, V>, verifier: &C)
+        -> ConfigResult<Self>
+    where
+        C: ConfigVerifier<U, Record = Self, Error = ConfigError>,
+        T: Into<U>,
+    {
+        unver.into_ver(verifier)
+    }
+
+    /// Unwrap the underlying record.
+    pub fn into_raw(self) -> T { self.data }
+
+    /// Get a reference to the value at the end of a key path.
+    pub fn get(&self, keypath: &str) -> Option<&V> {
+        self.data.get(keypath)
+    }
+
+    /// Get a reference to the value at the end of a key path, returning `Err`
+    /// if it doesn't exist.
+    pub fn get_ok(&self, keypath: &str) -> ConfigResult<&V> {
+        self.get(keypath)
+            .ok_or(ConfigError::MissingKey(keypath.to_string()))
+    }
+
+    /// Convert the value at the end of a key path to a new type if it exists.
+    pub fn get_into<U>(&self, keypath: &str) -> Option<ConfigResult<U>>
+    where V: Clone + TryInto<U>
+    {
+        self.data.get(keypath)
+            .map(|v| {
+                v.clone().try_into()
+                    .map_err(|_| {
+                        ConfigError::FailedTypeConversion(keypath.to_string())
+                    })
+            })
+    }
+
+    /// Convert the value at the end of a key path into a new type, returning
+    /// `Err` if it doesn't exist or the conversion fails.
+    pub fn get_into_ok<U>(&self, keypath: &str) -> ConfigResult<U>
+    where V: Clone + TryInto<U>
+    {
+        self.get_ok(keypath)
+            .and_then(|v| {
+                v.clone().try_into()
+                    .map_err(|_| {
+                        ConfigError::FailedTypeConversion(keypath.to_string())
+                    })
+            })
+    }
+}
+
+impl<T, V> Config<T, V>
+where T: InternalRecord<Value = V> + Serialize
+{
+    /// Generate a TOML-formatted string from the underlying data.
+    pub fn as_toml_string(&self) -> ConfigResult<String> {
+        Ok(toml::to_string(&self.data)?)
+    }
+
+    /// Generate a TOML-formatted "pretty" string from the underlying data.
+    pub fn as_toml_string_pretty(&self) -> ConfigResult<String> {
+        Ok(toml::to_string_pretty(&self.data)?)
+    }
+
+    /// Write the underlying data to a TOML-formatted file.
+    pub fn write_toml<P>(&self, outfile: P, append: bool)
+        -> ConfigResult<&Self>
+    where P: AsRef<Path>
+    {
+        write_str_to_file(outfile, &self.as_toml_string()?, append)?;
+        Ok(self)
+    }
+
+    /// Write the underlying data to a "pretty" TOML-formatted file.
+    pub fn write_toml_pretty<P>(&self, outfile: P, append: bool)
+        -> ConfigResult<&Self>
+    where P: AsRef<Path>
+    {
+        write_str_to_file(outfile, &self.as_toml_string_pretty()?, append)?;
+        Ok(self)
+    }
+
+    /// Generate a JSON-formatted string from the underlying data.
+    pub fn as_json_string(&self) -> ConfigResult<String> {
+        Ok(json::to_string(&self.data)?)
+    }
+
+    /// Generate a JSON-formatted "pretty" string from the underlying data.
+    pub fn as_json_string_pretty(&self) -> ConfigResult<String> {
+        Ok(json::to_string_pretty(&self.data)?)
+    }
+
+    /// Write the underlying data to a JSON-formatted file.
+    pub fn write_json<P>(&self, outfile: P, append: bool)
+        -> ConfigResult<&Self>
+    where P: AsRef<Path>
+    {
+        write_str_to_file(outfile, &self.as_json_string()?, append)?;
+        Ok(self)
+    }
+
+    /// Write the underlying data to a "pretty" JSON-formatted file.
+    pub fn write_json_pretty<P>(&self, outfile: P, append: bool)
+        -> ConfigResult<&Self>
+    where P: AsRef<Path>
+    {
+        write_str_to_file(outfile, &self.as_json_string_pretty()?, append)?;
+        Ok(self)
+    }
+
+    /// Generate a YAML-formatted string from the underlying data.
+    pub fn as_yaml_string(&self) -> ConfigResult<String> {
+        Ok(yaml::to_string(&self.data)?)
+    }
+
+    /// Write the underlying data to a YAML-formatted file.
+    pub fn write_yaml<P>(&self, outfile: P, append: bool)
+        -> ConfigResult<&Self>
+    where P: AsRef<Path>
+    {
+        write_str_to_file(outfile, &self.as_yaml_string()?, append)?;
+        Ok(self)
+    }
+}
+
+pub type TomlConfig = Config<toml::Table, toml::Value>;
+pub type JsonConfig = Config<JsonObject, json::Value>;
+pub type YamlConfig = Config<yaml::Mapping, yaml::Value>;
+
+impl<T, V> From<Config<T, V>> for ConfigUnver<T, V>
+where T: InternalRecord<Value = V>
+{
+    fn from(config: Config<T, V>) -> Self { config.into_unver() }
+}
+
+/// A wrapper around an uverified config `T` holding values of type
+/// `V`.
+///
+/// See also [`ConfigVerifier`] and [`Config`].
+#[derive(Clone, Debug)]
+pub struct ConfigUnver<T, V>
+where T: InternalRecord<Value = V>
+{
+    data: T,
+}
+
+impl<T, V> AsRef<T> for ConfigUnver<T, V>
+where T: InternalRecord<Value = V>
+{
+    fn as_ref(&self) -> &T { &self.data }
+}
+
+impl<T, V> AsMut<T> for ConfigUnver<T, V>
+where T: InternalRecord<Value = V>
+{
+    fn as_mut(&mut self) -> &mut T { &mut self.data }
+}
+
+impl<T, V> FromStr for ConfigUnver<T, V>
+where T: FromStr + InternalRecord<Value = V>
+{
+    type Err = ConfigError;
+
+    fn from_str(s: &str) -> ConfigResult<Self> {
+        Ok(Self { data: s.parse().map_err(|_| ConfigError::StrParse)? })
+    }
+}
+
+impl<T, V> ConfigUnver<T, V>
+where T: InternalRecord<Value = V>
+{
+    /// Load config values from a file.
+    pub fn from_file<P, C>(infile: P) -> ConfigResult<Self>
+    where
+        T: FromStr,
+        P: AsRef<Path>,
+    {
+        let infile_str: String = infile.as_ref().display().to_string();
+        let data: T
+            = fs::read_to_string(infile)
+            .map_err(|_| ConfigError::FileRead(infile_str.clone()))?
+            .parse()
+            .map_err(|_| ConfigError::FileParse(infile_str.clone()))?;
+        Ok(Self { data })
+    }
+
+    /// Wrap an underlying record type.
+    pub fn from_data(data: T) -> Self { Self { data } }
+
+    /// Convert from a verified wrapper.
+    pub fn from_ver(ver: Config<T, V>) -> Self { ver.into() }
+
+    /// Convert to a verified wrapper.
+    pub fn into_ver<C, U>(self, verifier: &C) -> ConfigResult<Config<T, V>>
+    where
+        C: ConfigVerifier<U, Record = Config<T, V>, Error = ConfigError>,
+        T: Into<U>,
+    {
+        verifier.verify_into(self.data.into())
+    }
+
+    /// Unwrap the underlying record.
+    pub fn into_raw(self) -> T { self.data }
+
+    /// Get a reference to the value at the end of a key path.
+    pub fn get(&self, keypath: &str) -> Option<&V> {
+        self.data.get(keypath)
+    }
+
+    /// Get a reference to the value at the end of a key path, returning `Err`
+    /// if it doesn't exist.
+    pub fn get_ok(&self, keypath: &str) -> ConfigResult<&V> {
+        self.get(keypath)
+            .ok_or(ConfigError::MissingKey(keypath.to_string()))
+    }
+
+    /// Get a mutable reference to the value at the end of a key path.
+    pub fn get_mut(&mut self, keypath: &str) -> Option<&mut V> {
+        self.data.get_mut(keypath)
+    }
+
+    /// Get a mutable reference to the value at the end of a key path, returning
+    /// `Err` if it doesn't exist.
+    pub fn get_mut_ok(&mut self, keypath: &str) -> ConfigResult<&mut V> {
+        self.get_mut(keypath)
+            .ok_or(ConfigError::MissingKey(keypath.to_string()))
+    }
+
+    /// Convert the value at the end of a key path to a new type if it exists.
+    pub fn get_into<U>(&self, keypath: &str) -> Option<ConfigResult<U>>
+    where V: Clone + TryInto<U>
+    {
+        self.data.get(keypath)
+            .map(|v| {
+                v.clone().try_into()
+                    .map_err(|_| {
+                        ConfigError::FailedTypeConversion(keypath.to_string())
+                    })
+            })
+    }
+
+    /// Convert the value at the end of a key path into a new type, returning
+    /// `Err` if it doesn't exist or the conversion fails.
+    pub fn get_into_ok<U>(&self, keypath: &str) -> ConfigResult<U>
+    where V: Clone + TryInto<U>
+    {
+        self.get_ok(keypath)
+            .and_then(|v| {
+                v.clone().try_into()
+                    .map_err(|_| {
+                        ConfigError::FailedTypeConversion(keypath.to_string())
+                    })
+            })
+    }
+
+    /// Insert a value at the end of a key path, returning the previous value at
+    /// that location if it existed.
+    pub fn insert<U>(&mut self, keypath: &str, value: U) -> Option<V>
+    where U: Into<V>
+    {
+        self.data.insert(keypath, value)
+    }
+
+    /// Insert a value at the end of a key path, returning the previous value or
+    /// `Err` if it didn't exist.
+    pub fn insert_ok<U>(&mut self, keypath: &str, value: U) -> ConfigResult<V>
+    where U: Into<V>
+    {
+        self.insert(keypath, value)
+            .ok_or(ConfigError::MissingKey(keypath.to_string()))
+    }
+
+    /// Insert a value at the end of a key path, converting the previous value
+    /// at that location to a new type if it existed.
+    pub fn insert_into<W, U>(&mut self, keypath: &str, value: W)
+        -> Option<ConfigResult<U>>
+    where
+        W: Into<V>,
+        V: TryInto<U>,
+    {
+        self.insert(keypath, value)
+            .map(|v| {
+                v.try_into()
+                    .map_err(|_| {
+                        ConfigError::FailedTypeConversion(keypath.to_string())
+                    })
+            })
+    }
+
+    /// Insert a value at the end of a key path, converting the previous value
+    /// at that location to a new type or returning `Err` if it didn't exist or
+    /// the type conversion failed.
+    pub fn insert_into_ok<W, U>(&mut self, keypath: &str, value: W)
+        -> ConfigResult<U>
+    where
+        W: Into<V>,
+        V: TryInto<U>,
+    {
+        self.insert_ok(keypath, value)
+            .and_then(|v| {
+                v.try_into()
+                    .map_err(|_| {
+                        ConfigError::FailedTypeConversion(keypath.to_string())
+                    })
+            })
+    }
+
+    /// Remove a value at the end of a key path if it existed.
+    pub fn remove(&mut self, keypath: &str) -> Option<V> {
+        self.data.remove(keypath)
+    }
+
+    /// Remove a value at the end of a key path, returning `Err` if it didn't
+    /// exist.
+    pub fn remove_ok(&mut self, keypath: &str) -> ConfigResult<V> {
+        self.remove(keypath)
+            .ok_or(ConfigError::MissingKey(keypath.to_string()))
+    }
+
+    /// Remove a value at the end of a key path, converting it to a new type if
+    /// it existed.
+    pub fn remove_into<U>(&mut self, keypath: &str) -> Option<ConfigResult<U>>
+    where V: TryInto<U>
+    {
+        self.remove(keypath)
+            .map(|v| {
+                v.try_into()
+                    .map_err(|_| {
+                        ConfigError::FailedTypeConversion(keypath.to_string())
+                    })
+            })
+    }
+
+    /// Remove a value at the end of a key path, converting it to a new type or
+    /// returning `Err` if it didn't exist or the type conversion failed.
+    pub fn remove_into_ok<U>(&mut self, keypath: &str) -> ConfigResult<U>
+    where V: TryInto<U>
+    {
+        self.remove_ok(keypath)
+            .and_then(|v| {
+                v.try_into()
+                    .map_err(|_| {
+                        ConfigError::FailedTypeConversion(keypath.to_string())
+                    })
+            })
+    }
+}
+
+impl<T, V> ConfigUnver<T, V>
+where T: InternalRecord<Value = V> + Serialize
+{
+    /// Generate a TOML-formatted string from the underlying data.
+    pub fn as_toml_string(&self) -> ConfigResult<String> {
+        Ok(toml::to_string(&self.data)?)
+    }
+
+    /// Generate a TOML-foratted "pretty" string from the underlying data.
+    pub fn as_toml_string_pretty(&self) -> ConfigResult<String> {
+        Ok(toml::to_string_pretty(&self.data)?)
+    }
+
+    /// Write the underlying data to a TOML-formatted file.
+    pub fn write_toml<P>(&self, outfile: P, append: bool)
+        -> ConfigResult<&Self>
+    where P: AsRef<Path>
+    {
+        write_str_to_file(outfile, &self.as_toml_string()?, append)?;
+        Ok(self)
+    }
+
+    /// Write the underlying data to a "pretty" TOML-formatted file.
+    pub fn write_toml_pretty<P>(&self, outfile: P, append: bool)
+        -> ConfigResult<&Self>
+    where P: AsRef<Path>
+    {
+        write_str_to_file(outfile, &self.as_toml_string_pretty()?, append)?;
+        Ok(self)
+    }
+
+    /// Generate a JSON-formatted string from the underlying data.
+    pub fn as_json_string(&self) -> ConfigResult<String> {
+        Ok(json::to_string(&self.data)?)
+    }
+
+    /// Generate a JSON-formatted "pretty" string from the underlying data.
+    pub fn as_json_string_pretty(&self) -> ConfigResult<String> {
+        Ok(json::to_string_pretty(&self.data)?)
+    }
+
+    /// Write the underlying data to a JSON-formatted file.
+    pub fn write_json<P>(&self, outfile: P, append: bool)
+        -> ConfigResult<&Self>
+    where P: AsRef<Path>
+    {
+        write_str_to_file(outfile, &self.as_json_string()?, append)?;
+        Ok(self)
+    }
+
+    /// Write the underlying data to a "pretty" JSON-formatted file.
+    pub fn write_json_pretty<P>(&self, outfile: P, append: bool)
+        -> ConfigResult<&Self>
+    where P: AsRef<Path>
+    {
+        write_str_to_file(outfile, &self.as_json_string_pretty()?, append)?;
+        Ok(self)
+    }
+
+    /// Generate a YAML-formatted string from the underlying data.
+    pub fn as_yaml_string(&self) -> ConfigResult<String> {
+        Ok(yaml::to_string(&self.data)?)
+    }
+
+    /// Write the underlying data to a YAML-formatted file.
+    pub fn write_yaml<P>(&self, outfile: P, append: bool)
+        -> ConfigResult<&Self>
+    where P: AsRef<Path>
+    {
+        write_str_to_file(outfile, &self.as_yaml_string()?, append)?;
+        Ok(self)
+    }
+}
+
+pub type TomlConfigUnver = ConfigUnver<toml::Table, toml::Value>;
+pub type JsonConfigUnver = ConfigUnver<JsonObject, json::Value>;
+pub type YamlConfigUnver = ConfigUnver<yaml::Mapping, yaml::Value>;
+
+fn write_str_to_file<P>(outfile: P, s: &str, append: bool) -> ConfigResult<()>
+where P: AsRef<Path>
+{
+    let outfile_string = outfile.as_ref().display().to_string();
+    let mut out
+        = fs::OpenOptions::new()
+        .write(true)
+        .create(true)
+        .truncate(!append)
+        .append(append)
+        .open(outfile)
+        .map_err(|e| {
+            ConfigError::FileOpen(outfile_string.clone(), e.to_string())
+        })?;
+    write!(&mut out, "{}", s)
+        .map_err(|e| {
+            ConfigError::FileWrite(outfile_string.clone(), e.to_string())
+        })?;
+    Ok(())
 }
 

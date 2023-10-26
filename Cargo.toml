@@ -19,21 +19,7 @@ ndarray = "0.15.6"
 num-complex = "0.4.2"
 num-traits = "0.2.15"
 regex = "1.9.1"
-serde = "1.0.164"
 thiserror = "1.0.40"
-toml = { version = "0.7.5", features = [ "display",] }
-
-[dependencies.rand]
-version = "0.8.5"
-optional = true
-
-[dependencies.rustfft]
-version = "6.0.1"
-optional = true
-
-[dependencies.ndrustfft]
-version = "0.3.0"
-optional = true
 
 [dependencies.ndarray-linalg]
 version = "0.15.0"
@@ -43,18 +29,47 @@ optional = true
 version = "0.8.1"
 optional = true
 
+[dependencies.ndrustfft]
+version = "0.3.0"
+optional = true
+
 [dependencies.plotters]
 version = "0.3.4"
 optional = true
 
-[dependencies.plotly]
-version = "0.7.0"
-features = [ "kaleido", "plotly_ndarray",]
-optional = true
+# [dependencies.plotly]
+# version = "0.8.4"
+# features = [ "kaleido", "plotly_ndarray",]
+# optional = true
 
 [dependencies.pyo3]
 version = "0.17.1"
 features = [ "extension-module",]
+optional = true
+[dependencies.rand]
+version = "0.8.5"
+optional = true
+
+[dependencies.rustfft]
+version = "6.0.1"
+optional = true
+
+[dependencies.serde]
+version = "1.0.190"
+optional = true
+
+[dependencies.serde_json]
+version = "1.0.105"
+features = [ "std",]
+optional = true
+
+[dependencies.serde_yaml]
+version = "0.9.27"
+optional = true
+
+[dependencies.toml]
+version = "0.7.5"
+features = [ "parse", "display",]
 optional = true
 
 [lib]
@@ -62,18 +77,20 @@ name = "whooie"
 path = "lib/lib.rs"
 
 [features]
+config = [ "dep:serde", "dep:toml", "dep:serde_json", "dep:serde_yaml",]
 nd = [ ]
-ndarray-utils = [ "dep:ndarray-npy",]
+ndarray-utils = [ "dep:serde", "dep:ndarray-npy",]
 plotting = [ "dep:plotters",]
-plotting-plotly = [ "dep:plotly",]
+# plotting-plotly = [ "dep:plotly",]
 pyo3-utils = [ "dep:pyo3",]
 math = [ "dep:rand", "dep:ndarray-linalg", "dep:rustfft", "dep:ndrustfft",]
 zx = [ ]
 all = [
+    "config",
     "nd",
     "ndarray-utils",
     "plotting",
-    "plotting-plotly",
+    # "plotting-plotly",
     "pyo3-utils",
     "math",
     "zx",
