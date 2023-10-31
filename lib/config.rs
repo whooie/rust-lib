@@ -24,7 +24,7 @@ use std::{
 use toml;
 use serde_json as json;
 use serde_yaml as yaml;
-use serde::Serialize;
+use serde::{ Deserialize, Serialize };
 use thiserror::Error;
 
 #[derive(Error, Debug)]
@@ -84,10 +84,13 @@ pub trait ValueVerifier<V> {
 pub enum Verifier {
     /// Null value
     Null,
+
     /// Boolean value
     Bool,
+
     /// Integer value (default `i64`)
     Int,
+
     /// A range of integer (default `i64`) values
     IntRange {
         min: i64,
@@ -95,10 +98,13 @@ pub enum Verifier {
         incl_min: bool,
         incl_max: bool,
     },
+
     /// A discrete collection of integer (default `i64`) values
     IntColl(HashSet<i64>),
+
     /// Floating-point value (default `f64`)
     Float,
+
     /// A range of floating-point (default `f64`) values
     FloatRange {
         min: f64,
@@ -106,12 +112,16 @@ pub enum Verifier {
         incl_min: bool,
         incl_max: bool,
     },
+
     /// An integer or floating-point value
     Number,
+
     /// A date-time value
     Datetime,
+
     /// An array of any length or type
     Array,
+
     /// An array with constrained values.
     ///
     /// Using `finite = true` will impose constraints on the length and position
@@ -121,16 +131,31 @@ pub enum Verifier {
         forms: Vec<Verifier>,
         finite: bool,
     },
+
     /// String value
     Str,
+
     /// A discrete collection of string values
     StrColl(HashSet<String>),
+
     /// A sub-table
     Table,
+
+    /// A sub-table with constrained values.
+    TableForm(HashMap<String, Verifier>),
+
     /// Any non-table value
     Any,
+
     /// Any value, including a sub-table
     AnyTable,
+}
+
+fn indent_block(instr: &str, n: usize) -> String {
+    instr.split('\n')
+        .map(|line| "  ".repeat(n) + line)
+        .collect::<Vec<String>>()
+        .join("\n")
 }
 
 impl fmt::Display for Verifier {
@@ -188,6 +213,18 @@ impl fmt::Display for Verifier {
                 Ok(())
             },
             Self::Table => write!(f, "Table"),
+            Self::TableForm(tab) => {
+                let items: String
+                    = indent_block(
+                        &tab.iter()
+                            .map(|(s, v)| format!("{} : {}", s, v))
+                            .collect::<Vec<String>>()
+                            .join(",\n"),
+                        1,
+                    );
+                write!(f, "TableForm {{\n{}\n}}", items)?;
+                Ok(())
+            },
             Self::Any => write!(f, "Any"),
             Self::AnyTable => write!(f, "AnyTable"),
         }
@@ -241,6 +278,12 @@ impl ValueVerifier<toml::Value> for Verifier {
             (Self::Str, Value::String(_)) => true,
             (Self::StrColl(coll), Value::String(s)) => coll.contains(s),
             (Self::Table, Value::Table(_)) => true,
+            (Self::TableForm(forms), Value::Table(tab)) => {
+                forms.iter()
+                    .all(|(s, ver)| {
+                        tab.get(s).is_some_and(|val| ver.verify(val))
+                    })
+            },
             (Self::Any, Value::Boolean(_))
                 | (Self::Any, Value::Float(_))
                 | (Self::Any, Value::Datetime(_))
@@ -312,6 +355,12 @@ impl ValueVerifier<json::Value> for Verifier {
             (Self::Str, Value::String(_)) => true,
             (Self::StrColl(coll), Value::String(s)) => coll.contains(s),
             (Self::Table, Value::Object(_)) => true,
+            (Self::TableForm(forms), Value::Object(obj)) => {
+                forms.iter()
+                    .all(|(s, ver)| {
+                        obj.get(s).is_some_and(|val| ver.verify(val))
+                    })
+            },
             (Self::Any, Value::Bool(_))
                 | (Self::Any, Value::Number(_))
                 | (Self::Any, Value::Array(_))
@@ -383,6 +432,12 @@ impl ValueVerifier<yaml::Value> for Verifier {
             (Self::Str, Value::String(_)) => true,
             (Self::StrColl(coll), Value::String(s)) => coll.contains(s),
             (Self::Table, Value::Mapping(_)) => true,
+            (Self::TableForm(forms), Value::Mapping(map)) => {
+                forms.iter()
+                    .all(|(s, ver)| {
+                        map.get(s).is_some_and(|val| ver.verify(val))
+                    })
+            },
             (Self::Any, Value::Bool(_))
                 | (Self::Any, Value::Number(_))
                 | (Self::Any, Value::Sequence(_))
@@ -407,6 +462,18 @@ where U: ValueVerifier<V>
 {
     Value(U),
     Table(ConfigSpec<U, V>),
+}
+
+impl<U, V> From<U> for ConfigSpecItem<U, V>
+where U: ValueVerifier<V>
+{
+    fn from(ver: U) -> Self { Self::Value(ver) }
+}
+
+impl<U, V> From<ConfigSpec<U, V>> for ConfigSpecItem<U, V>
+where U: ValueVerifier<V>
+{
+    fn from(confspec: ConfigSpec<U, V>) -> Self { Self::Table(confspec) }
 }
 
 /// Sugared [`HashMap`] representing a specification for the values and
@@ -618,163 +685,139 @@ impl ConfigVerifier<yaml::Value> for ConfigSpec<Verifier, yaml::Value> {
 #[macro_export]
 macro_rules! confspec {
     ( Null ) => {
-        $crate::config::ConfigSpecItem::Value(
-            $crate::config::Verifier::Null
-        )
+        $crate::config::Verifier::Null.into()
     };
     ( Bool ) => {
-        $crate::config::ConfigSpecItem::Value(
-            $crate::config::Verifier::Bool
-        )
+        $crate::config::Verifier::Bool.into()
     };
     ( Int ) => {
-        $crate::config::ConfigSpecItem::Value(
-            $crate::config::Verifier::Int
-        )
+        $crate::config::Verifier::Int.into()
     };
     ( IntRange { ( $min:expr, $max:expr ) } ) => {
-        $crate::config::ConfigSpecItem::Value(
-            $crate::config::Verifier::IntRange {
-                min: $min,
-                max: $max,
-                incl_min: false,
-                incl_max: false,
-            }
-        )
+        $crate::config::Verifier::IntRange {
+            min: $min,
+            max: $max,
+            incl_min: false,
+            incl_max: false,
+        }
+        .into()
     };
     ( IntRange { =( $min:expr, $max:expr ) } ) => {
-        $crate::config::ConfigSpecItem::Value(
-            $crate::config::Verifier::IntRange {
-                min: $min,
-                max: $max,
-                incl_min: true,
-                incl_max: false,
-            }
-        )
+        $crate::config::Verifier::IntRange {
+            min: $min,
+            max: $max,
+            incl_min: true,
+            incl_max: false,
+        }
+        .into()
     };
     ( IntRange { ( $min:expr, $max:expr )= } ) => {
-        $crate::config::ConfigSpecItem::Value(
-            $crate::config::Verifier::IntRange {
-                min: $min,
-                max: $max,
-                incl_min: false,
-                incl_max: true,
-            }
-        )
+        $crate::config::Verifier::IntRange {
+            min: $min,
+            max: $max,
+            incl_min: false,
+            incl_max: true,
+        }
+        .into()
     };
     ( IntRange { =( $min:expr, $max:expr )= } ) => {
-        $crate::config::ConfigSpecItem::Value(
-            $crate::config::Verifier::IntRange {
-                min: $min,
-                max: $max,
-                incl_min: true,
-                incl_max: true,
-            }
-        )
+        $crate::config::Verifier::IntRange {
+            min: $min,
+            max: $max,
+            incl_min: true,
+            incl_max: true,
+        }
+        .into()
     };
     ( IntColl { $( $i:expr ),* $(,)? } ) => {
-        $crate::config::ConfigSpecItem::Value(
-            $crate::config::Verifier::IntColl(
-                std::collections::HashSet::from_iter([$( $i ),*])
-            )
+        $crate::config::Verifier::IntColl(
+            std::collections::HashSet::from_iter([$( $i ),*])
         )
+        .into()
     };
     ( Float ) => {
-        $crate::config::ConfigSpecItem::Value(
-            $crate::config::Verifier::Float
-        )
+        $crate::config::Verifier::Float.into()
     };
     ( FloatRange { ( $min:expr, $max:expr ) } ) => {
-        $crate::config::ConfigSpecItem::Value(
-            $crate::config::Verifier::FloatRange {
-                min: $min,
-                max: $max,
-                incl_min: false,
-                incl_max: false,
-            }
-        )
+        $crate::config::Verifier::FloatRange {
+            min: $min,
+            max: $max,
+            incl_min: false,
+            incl_max: false,
+        }
+        .into()
     };
     ( FloatRange { =( $min:expr, $max:expr ) } ) => {
-        $crate::config::ConfigSpecItem::Value(
-            $crate::config::Verifier::FloatRange {
-                min: $min,
-                max: $max,
-                incl_min: true,
-                incl_max: false,
-            }
-        )
+        $crate::config::Verifier::FloatRange {
+            min: $min,
+            max: $max,
+            incl_min: true,
+            incl_max: false,
+        }
+        .into()
     };
     ( FloatRange { ( $min:expr, $max:expr )= } ) => {
-        $crate::config::ConfigSpecItem::Value(
-            $crate::config::Verifier::FloatRange {
-                min: $min,
-                max: $max,
-                incl_min: false,
-                incl_max: true,
-            }
-        )
+        $crate::config::Verifier::FloatRange {
+            min: $min,
+            max: $max,
+            incl_min: false,
+            incl_max: true,
+        }
+        .into()
     };
     ( FloatRange { =( $min:expr, $max:expr )= } ) => {
-        $crate::config::ConfigSpecItem::Value(
-            $crate::config::Verifier::FloatRange {
-                min: $min,
-                max: $max,
-                incl_min: true,
-                incl_max: true,
-            }
-        )
+        $crate::config::Verifier::FloatRange {
+            min: $min,
+            max: $max,
+            incl_min: true,
+            incl_max: true,
+        }
+        .into()
     };
     ( Number ) => {
-        $crate::config::ConfigSpecItem::Value(
-            $crate::config::Verifier::Number
-        )
+        $crate::config::Verifier::Number.into()
     };
     ( Datetime ) => {
-        $crate::config::ConfigSpecItem::Value(
-            $crate::config::Verifier::Datetime
-        )
+        $crate::config::Verifier::Datetime.into()
     };
     ( Array ) => {
-        $crate::config::ConfigSpecItem::Value(
-            $crate::config::Verifier::Array
-        )
+        $crate::config::Verifier::Array.into()
     };
     ( ArrayForm { [ $( $form:expr ),* $(,)? ], finite: $f:expr $(,)? } ) => {
-        $crate::config::ConfigSpecItem::Value(
-            $crate::config::Verifier::ArrayForm {
-                forms: vec![ $( $form ),* ],
-                finite: $f,
-            }
-        )
+        $crate::config::Verifier::ArrayForm {
+            forms: vec![ $( $form ),* ],
+            finite: $f,
+        }
+        .into()
     };
     ( Str ) => {
-        $crate::config::ConfigSpecItem::Value(
-            $crate::config::Verifier::Str
-        )
+        $crate::config::Verifier::Str.into()
     };
     ( StrColl { $( $s:expr ),* $(,)? } ) => {
-        $crate::config::ConfigSpecItem::Value(
-            $crate::config::Verifier::StrColl(
-                std::collections::HashSet::from_iter([$( $s.to_string() ),*])
-            )
+        $crate::config::Verifier::StrColl(
+            std::collections::HashSet::from_iter([$( $s.to_string() ),*])
         )
+        .into()
     };
     ( Table { $( $key:expr => $spec:expr ),* $(,)? } ) => {
-        $crate::config::ConfigSpecItem::Table(
-            $crate::config::ConfigSpec::from_iter([
+        $crate::config::ConfigSpec::from_iter([
+            $( ($key.to_string(), $spec) ),*
+        ])
+        .into()
+    };
+    ( TableForm { $( $key:expr => $spec:expr ),* $(,)? } ) => {
+        $crate::config::Verifier::TableForm(
+            HashMap::from_iter([
                 $( ($key.to_string(), $spec) ),*
             ])
         )
+        .into()
     };
     ( Any ) => {
-        $crate::config::ConfigSpecItem::Value(
-            $crate::config::Verifier::Any
-        )
+        $crate::config::Verifier::Any.into()
     };
     ( AnyTable ) => {
-        $crate::config::ConfigSpecItem::Value(
-            $crate::config::Verifier::AnyTable
-        )
+        $crate::config::Verifier::AnyTable.into()
     };
     ( { $( $key:expr => $spec:expr ),* $(,)? } ) => {
         $crate::config::ConfigSpec::from_iter([
@@ -1330,33 +1373,6 @@ where T: InternalRecord<Value = V>
         self.get(keypath)
             .ok_or(ConfigError::MissingKey(keypath.to_string()))
     }
-
-    /// Convert the value at the end of a key path to a new type if it exists.
-    pub fn get_into<U>(&self, keypath: &str) -> Option<ConfigResult<U>>
-    where V: Clone + TryInto<U>
-    {
-        self.data.get(keypath)
-            .map(|v| {
-                v.clone().try_into()
-                    .map_err(|_| {
-                        ConfigError::FailedTypeConversion(keypath.to_string())
-                    })
-            })
-    }
-
-    /// Convert the value at the end of a key path into a new type, returning
-    /// `Err` if it doesn't exist or the conversion fails.
-    pub fn get_into_ok<U>(&self, keypath: &str) -> ConfigResult<U>
-    where V: Clone + TryInto<U>
-    {
-        self.get_ok(keypath)
-            .and_then(|v| {
-                v.clone().try_into()
-                    .map_err(|_| {
-                        ConfigError::FailedTypeConversion(keypath.to_string())
-                    })
-            })
-    }
 }
 
 impl<T, V> Config<T, V>
@@ -1437,6 +1453,35 @@ pub type TomlConfig = Config<toml::Table, toml::Value>;
 pub type JsonConfig = Config<JsonObject, json::Value>;
 pub type YamlConfig = Config<yaml::Mapping, yaml::Value>;
 
+impl TomlConfig {
+    /// Convert the value at the end of a key path to a new type if it exists.
+    pub fn get_into<'de, U>(&self, keypath: &str) -> Option<ConfigResult<U>>
+    where U: Deserialize<'de>
+    {
+        self.data.get(keypath)
+            .map(|v| {
+                v.clone().try_into()
+                    .map_err(|_| {
+                        ConfigError::FailedTypeConversion(keypath.to_string())
+                    })
+            })
+    }
+
+    /// Convert the value at the end of a key path into a new type, returning
+    /// `Err` if it doesn't exist or the conversion fails.
+    pub fn get_into_ok<'de, U>(&self, keypath: &str) -> ConfigResult<U>
+    where U: Deserialize<'de>
+    {
+        self.get_ok(keypath)
+            .and_then(|v| {
+                v.clone().try_into()
+                    .map_err(|_| {
+                        ConfigError::FailedTypeConversion(keypath.to_string())
+                    })
+            })
+    }
+}
+
 impl<T, V> From<Config<T, V>> for ConfigUnver<T, V>
 where T: InternalRecord<Value = V>
 {
@@ -1447,7 +1492,7 @@ where T: InternalRecord<Value = V>
 /// `V`.
 ///
 /// See also [`ConfigVerifier`] and [`Config`].
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, Default)]
 pub struct ConfigUnver<T, V>
 where T: InternalRecord<Value = V>
 {
@@ -1479,8 +1524,15 @@ where T: FromStr + InternalRecord<Value = V>
 impl<T, V> ConfigUnver<T, V>
 where T: InternalRecord<Value = V>
 {
+    /// Create a new, [`Default`] config.
+    pub fn new() -> Self
+    where T: Default
+    {
+        Self { data: Default::default() }
+    }
+
     /// Load config values from a file.
-    pub fn from_file<P, C>(infile: P) -> ConfigResult<Self>
+    pub fn from_file<P>(infile: P) -> ConfigResult<Self>
     where
         T: FromStr,
         P: AsRef<Path>,
@@ -1534,33 +1586,6 @@ where T: InternalRecord<Value = V>
     pub fn get_mut_ok(&mut self, keypath: &str) -> ConfigResult<&mut V> {
         self.get_mut(keypath)
             .ok_or(ConfigError::MissingKey(keypath.to_string()))
-    }
-
-    /// Convert the value at the end of a key path to a new type if it exists.
-    pub fn get_into<U>(&self, keypath: &str) -> Option<ConfigResult<U>>
-    where V: Clone + TryInto<U>
-    {
-        self.data.get(keypath)
-            .map(|v| {
-                v.clone().try_into()
-                    .map_err(|_| {
-                        ConfigError::FailedTypeConversion(keypath.to_string())
-                    })
-            })
-    }
-
-    /// Convert the value at the end of a key path into a new type, returning
-    /// `Err` if it doesn't exist or the conversion fails.
-    pub fn get_into_ok<U>(&self, keypath: &str) -> ConfigResult<U>
-    where V: Clone + TryInto<U>
-    {
-        self.get_ok(keypath)
-            .and_then(|v| {
-                v.clone().try_into()
-                    .map_err(|_| {
-                        ConfigError::FailedTypeConversion(keypath.to_string())
-                    })
-            })
     }
 
     /// Insert a value at the end of a key path, returning the previous value at
@@ -1733,6 +1758,35 @@ where T: InternalRecord<Value = V> + Serialize
 pub type TomlConfigUnver = ConfigUnver<toml::Table, toml::Value>;
 pub type JsonConfigUnver = ConfigUnver<JsonObject, json::Value>;
 pub type YamlConfigUnver = ConfigUnver<yaml::Mapping, yaml::Value>;
+
+impl TomlConfigUnver {
+    /// Convert the value at the end of a key path to a new type if it exists.
+    pub fn get_into<'de, U>(&self, keypath: &str) -> Option<ConfigResult<U>>
+    where U: Deserialize<'de>
+    {
+        self.data.get(keypath)
+            .map(|v| {
+                v.clone().try_into()
+                    .map_err(|_| {
+                        ConfigError::FailedTypeConversion(keypath.to_string())
+                    })
+            })
+    }
+
+    /// Convert the value at the end of a key path into a new type, returning
+    /// `Err` if it doesn't exist or the conversion fails.
+    pub fn get_into_ok<'de, U>(&self, keypath: &str) -> ConfigResult<U>
+    where U: Deserialize<'de>
+    {
+        self.get_ok(keypath)
+            .and_then(|v| {
+                v.clone().try_into()
+                    .map_err(|_| {
+                        ConfigError::FailedTypeConversion(keypath.to_string())
+                    })
+            })
+    }
+}
 
 fn write_str_to_file<P>(outfile: P, s: &str, append: bool) -> ConfigResult<()>
 where P: AsRef<Path>
