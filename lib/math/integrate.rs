@@ -394,7 +394,7 @@ where
 }
 
 fn simps_factor(km1: usize) -> f64 {
-    return if km1 % 2 == 0 { 1.0 / 3.0 } else { 4.0 / 3.0 }
+    return if km1 % 2 == 0 { 1.0 / 3.0 } else { 1.0 }
 }
 
 /// Compute the progressive integral via Simpson's rule.
@@ -421,6 +421,16 @@ where
         .collect();
     i.move_into(I.slice_mut(s![1..n]));
     return I;
+}
+
+fn boole_factor(km1: usize) -> f64 {
+    return match km1 % 4 {
+        0 => 14.0 / 45.0,
+        1 => 50.0 / 45.0,
+        2 => 10.0 / 45.0,
+        3 => 50.0 / 45.0,
+        _ => unreachable!(),
+    };
 }
 
 /// Compute the progressive integral along a single axis via Simpson's rule.
@@ -469,6 +479,78 @@ where
     return I;
 }
 
+/// Compute the progressive integral via Boole's rule.
+///
+/// For optimal performance, the number of grid points should be one more than a
+/// multiple of four.
+pub fn boole_prog<A, X>(y: &nd::Array1<A>, dx: &X) -> nd::Array1<A>
+where
+    A: Clone + Add<Output = A> + AddAssign<A> + Mul<X, Output = A> + Zero,
+    X: Float + Mul<f64, Output = X>,
+{
+    let n: usize = y.len();
+    let mut I: nd::Array1<A> = nd::Array::zeros(n);
+    let mut acc = A::zero();
+    let i: nd::Array1<A>
+        = y.iter().take(n - 1).zip(y.iter().skip(1)).enumerate()
+        .map(|(km1, (ykm1, yk))| {
+            acc += (
+                ykm1.clone() * (*dx * boole_factor(km1))
+                + yk.clone() * (*dx * (14.0 / 45.0))
+            );
+            acc.clone()
+        })
+        .collect();
+    i.move_into(I.slice_mut(s![1..n]));
+    return I;
+}
+
+/// Compute the progressive integral along a single axis via Boole's rule.
+///
+/// For optimal performance, the number of grid points should be one more than a
+/// multiple of four.
+///
+/// **Warning: this routine is *very* expensive to run!**
+pub fn boole_prog_axis<A, D, X>(y: &nd::Array<A, D>, dx: &X, axis: usize)
+    -> nd::Array<A, D>
+where
+    A: Clone + Add<Output = A> + AddAssign<A> + Mul<X, Output = A> + Zero,
+    X: Float + Mul<f64, Output = X>,
+    D: nd::RemoveAxis,
+    <D as nd::Dimension>::Smaller: nd::Dimension<Larger = D>,
+{
+    let n: usize = y.shape()[axis];
+    let ndaxis = nd::Axis(axis);
+    let mut I: nd::Array<A, D> = nd::Array::zeros(y.raw_dim());
+    let mut acc: nd::Array<A, <D as nd::Dimension>::Smaller>
+        = nd::Array::zeros(y.raw_dim().remove_axis(ndaxis));
+    let slices: Vec<nd::Array<A, <D as nd::Dimension>::Smaller>>
+        = y.axis_iter(ndaxis).take(n - 1).zip(y.axis_iter(ndaxis).skip(1))
+        .enumerate()
+        .map(|(km1, (ykm1, yk))| {
+            acc.iter_mut().zip(ykm1.iter().zip(yk.iter()))
+                .for_each(|(accj, (ykm1j, ykj))| {
+                    *accj += (
+                        ykm1j.clone() * (*dx * boole_factor(km1))
+                        + ykj.clone() * (*dx * (14.0 / 45.0))
+                    );
+                });
+            acc.clone()
+        })
+        .collect();
+    let i: nd::Array<A, D>
+        = nd::stack(
+            ndaxis,
+            &slices.iter()
+                .map(|ik| ik.view())
+                .collect::<
+                    Vec<nd::ArrayView<A, <D as nd::Dimension>::Smaller>>
+                >()
+        ).unwrap();
+    i.move_into(I.slice_axis_mut(ndaxis, nd::Slice::from(1..n)));
+    return I;
+}
+
 /// Compute the progressive integral, minimizing truncation error by calculating
 /// using both rules and returning a final array that alternates between the
 /// two.
@@ -479,9 +561,18 @@ where
 {
     let tr: nd::Array1<A> = trapz_prog(y, dx);
     let si: nd::Array1<A> = simpson_prog(y, dx);
+    let bo: nd::Array1<A> = boole_prog(y, dx);
     let I: nd::Array1<A>
-        = tr.into_iter().zip(si).enumerate()
-        .map(|(k, (trk, sik))| if k % 2 == 0 { sik } else { trk })
+        = tr.into_iter().zip(si).zip(bo).enumerate()
+        .map(|(k, ((trk, sik), bok))| {
+            if k % 4 == 1 {
+                bok
+            } else if k % 2 == 0 {
+                sik
+            } else {
+                trk
+            }
+        })
         .collect();
     return I;
 }
@@ -503,11 +594,18 @@ where
     tr.swap_axes(0, axis);
     let mut si: nd::Array<A, D> = simpson_prog_axis(y, dx, axis);
     si.swap_axes(0, axis);
+    let mut bo: nd::Array<A, D> = boole_prog_axis(y, dx, axis);
+    bo.swap_axes(0, axis);
     let ndaxis = nd::Axis(0);
     let mut I: nd::Array<A, D>
-        = tr.axis_iter(ndaxis).zip(si.axis_iter(ndaxis)).enumerate()
-        .flat_map(|(k, (trk, sik))| {
-            if k % 2 == 0 {
+        = tr.axis_iter(ndaxis)
+        .zip(si.axis_iter(ndaxis))
+        .zip(bo.axis_iter(ndaxis))
+        .enumerate()
+        .flat_map(|(k, ((trk, sik), bok))| {
+            if k % 4 == 1 {
+                bok.into_owned().into_iter()
+            } else if k % 2 == 0 {
                 sik.into_owned().into_iter()
             } else {
                 trk.into_owned().into_iter()

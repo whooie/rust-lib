@@ -348,8 +348,8 @@ where
         + Copy,
 {
     // define safety numbers -- particular to rk4
-    let safe1: f64 = 0.9;
-    let safe2: f64 = 4.0;
+    const SAFE1: f64 = 0.9;
+    const SAFE2: f64 = 4.0;
 
     let mut dx_old: U;
     let mut dx_new: U = dx;
@@ -374,12 +374,12 @@ where
         // estimate new step size (with safety factors)
         dx_old = dx_new;
         if error_ratio == 0.0 {
-            dx_new = dx_old * safe2.powi(-1);
+            dx_new = dx_old * SAFE2.powi(-1);
             continue;
         }
-        dx_new = dx_old * error_ratio.powf(-0.2) * safe1;
-        dx_cond1 = dx_old * safe2.powi(-1);
-        dx_cond2 = dx_old * safe2;
+        dx_new = dx_old * error_ratio.powf(-0.2) * SAFE1;
+        dx_cond1 = dx_old * SAFE2.powi(-1);
+        dx_cond2 = dx_old * SAFE2;
         dx_new = if dx_cond1 > dx_new { dx_cond1 } else { dx_new };
         dx_new = if dx_cond2 < dx_new { dx_cond2 } else { dx_new };
 
@@ -416,8 +416,8 @@ where
     ND: nd::Dimension,
 {
     // define safety numbers -- particular to rk4
-    let safe1: f64 = 0.9;
-    let safe2: f64 = 4.0;
+    const SAFE1: f64 = 0.9;
+    const SAFE2: f64 = 4.0;
 
     let mut dx_old: U;
     let mut dx_new: U = dx;
@@ -443,12 +443,12 @@ where
         // estimate new step size (with safety factors)
         dx_old = dx_new;
         if error_ratio == 0.0 {
-            dx_new = dx_old * safe2.powi(-1);
+            dx_new = dx_old * SAFE2.powi(-1);
             continue;
         }
-        dx_new = dx_old * error_ratio.powf(-0.2) * safe1;
-        dx_cond1 = dx_old * safe2.powi(-1);
-        dx_cond2 = dx_old * safe2;
+        dx_new = dx_old * error_ratio.powf(-0.2) * SAFE1;
+        dx_cond1 = dx_old * SAFE2.powi(-1);
+        dx_cond2 = dx_old * SAFE2;
         dx_new = if dx_cond1 > dx_new { dx_cond1 } else { dx_new };
         dx_new = if dx_cond2 < dx_new { dx_cond2 } else { dx_new };
 
