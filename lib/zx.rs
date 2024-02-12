@@ -1206,12 +1206,34 @@ impl Diagram {
             scalar: self.scalar * rhs.scalar,
         };
     }
+
+    /// Return sets of all input and output wire indices.
+    pub fn ins_outs(&self) -> (HashSet<usize>, HashSet<usize>) {
+        let mut ins: HashSet<usize> = HashSet::new();
+        let mut outs: HashSet<usize> = HashSet::new();
+        for element in self.slices.iter() {
+            element.ins()
+                .into_iter()
+                .for_each(|k| {
+                    if outs.contains(&k) {
+                        outs.remove(&k);
+                    } else {
+                        ins.insert(k);
+                    }
+                });
+            element.outs()
+                .into_iter()
+                .for_each(|k| { outs.insert(k); });
+        }
+        return (ins, outs);
+    }
 }
 
 impl fmt::Display for Diagram {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        if let Some(first) = self.slices.first() {
-            let mut ins: Vec<usize> = first.ins().into_iter().collect();
+        let (ins, outs) = self.ins_outs();
+        if !ins.is_empty() {
+            let mut ins: Vec<usize> = ins.into_iter().collect();
             ins.sort();
             writeln!(f, "ins: {:?}", ins)?;
         } else {
@@ -1220,7 +1242,7 @@ impl fmt::Display for Diagram {
         if !self.slices.is_empty() {
             writeln!(f, "slices: {{")?;
             for slice in self.slices.iter() {
-                write!(f, "-→  ")?;
+                write!(f, "  ")?;
                 slice.fmt(f)?;
                 writeln!(f)?;
             }
@@ -1228,12 +1250,12 @@ impl fmt::Display for Diagram {
         } else {
             writeln!(f, "slices: {{ }}")?;
         }
-        if let Some(last) = self.slices.last() {
-            let mut outs: Vec<usize> = last.outs().into_iter().collect();
+        if !outs.is_empty() {
+            let mut outs: Vec<usize> = outs.into_iter().collect();
             outs.sort();
-            write!(f, "outs: {:?}", outs)?;
+            writeln!(f, "outs: {:?}", outs)?;
         } else {
-            write!(f, "outs: [ ]")?;
+            writeln!(f, "outs: [ ]")?;
         }
         return Ok(());
     }
