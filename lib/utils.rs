@@ -886,11 +886,28 @@ pub struct ExpVal {
 }
 
 impl ExpVal {
+    /// Create a new `ExpVal`.
     pub fn new(val: f64, err: f64) -> Self { Self { val, err: err.abs() } }
 
+    /// Get the mean value of `self`.
     pub fn val(self) -> f64 { self.val }
 
+    /// Get the standard error of `self`.
+    ///
+    /// This quantity is always non-negative.
     pub fn err(self) -> f64 { self.err.abs() }
+
+    /// Return a two-element iterator where the first is the mean value and the
+    /// second is the standard error.
+    pub fn iter(self) -> std::array::IntoIter<f64, 2> {
+        [self.val, self.err.abs()].into_iter()
+    }
+
+    /// Return a two-element iterator containing the values `val - |err|` and
+    /// `val + |err|`, in that order.
+    pub fn iter_bounds(self) -> std::array::IntoIter<f64, 2> {
+        [self.val - self.err.abs(), self.val + self.err.abs()].into_iter()
+    }
 }
 
 impl Float for ExpVal {
