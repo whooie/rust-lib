@@ -814,13 +814,11 @@ impl Element {
                     .map(|idx| [(idx, Zero), (idx, One)])
                     .multi_cartesian_product()
                     .map(|ins| {
-                        println!("{:?}", ins);
                         let ampl: C64
                             = ins.iter()
                             .any(|(_, s)| *s == Zero)
                             .then_some(c!(1.0))
                             .unwrap_or(a);
-                        println!("{}", ampl);
                         KetBra::new(ampl, [], ins)
                     })
                 .collect()

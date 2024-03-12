@@ -239,7 +239,6 @@ macro_rules! loop_call {
         lspace: $lspace:expr $(,)?
     ) => {
         {
-            let _caller_ = &mut $caller;
             let _Nvals_: Vec<usize> = vec![ $( $var.len() ),+ ];
             let _nvars_: usize = _Nvals_.len();
             let _Z_: Vec<usize>
@@ -247,11 +246,11 @@ macro_rules! loop_call {
                 .map(|n| (*n as f64).log10().floor() as usize + 1)
                 .collect();
             let _tot_: usize = _Nvals_.iter().product();
-            let mut _NN_: Vec<usize>
+            let _NN_: Vec<usize>
                 = (1.._nvars_).rev()
                 .map(|k| _Nvals_[_nvars_ - k.._nvars_].iter().product())
+                .chain([1])
                 .collect();
-            _NN_.push(1);
 
             let _mk_outstr_ = |Q: Vec<usize>, last: bool| -> String {
                 let mut outstr_items: Vec<String>
