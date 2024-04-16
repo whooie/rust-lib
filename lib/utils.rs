@@ -902,11 +902,25 @@ impl ExpVal {
         [self.val, self.err.abs()].into_iter()
     }
 
+    /// Return a two-element [`Vec`] where the first is the mean value and the
+    /// second is the standard error.
+    pub fn as_vec(self) -> Vec<f64> { vec![self.val, self.err.abs()] }
+
     /// Return a two-element iterator containing the values `val - |err|` and
     /// `val + |err|`, in that order.
     pub fn iter_bounds(self) -> std::array::IntoIter<f64, 2> {
         [self.val - self.err.abs(), self.val + self.err.abs()].into_iter()
     }
+
+    /// Return a two-element [`Vec`] containing the values `val - |err|` and
+    /// `val + |err|`, in that order.
+    pub fn as_vec_bounds(self) -> Vec<f64> {
+        vec![self.val - self.err.abs(), self.val + self.err.abs()]
+    }
+}
+
+impl From<ExpVal> for (f64, f64) {
+    fn from(ev: ExpVal) -> Self { (ev.val(), ev.err()) }
 }
 
 impl Float for ExpVal {
