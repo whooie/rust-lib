@@ -30,7 +30,7 @@ use num_traits::{
 use regex::Regex;
 use thiserror::Error;
 
-/// Call `print!` and automatically flush.
+/// Call `print!` and immediately flush.
 #[macro_export]
 macro_rules! print_flush {
     ( $fmt:literal $(, $val:expr )* $(,)?) => {
@@ -39,7 +39,7 @@ macro_rules! print_flush {
     }
 }
 
-/// Call `println!` and automatically flush.
+/// Call `println!` and immediately flush.
 #[macro_export]
 macro_rules! println_flush {
     ( $fmt:literal $(, $val:expr )* $(,)?) => {
@@ -48,7 +48,7 @@ macro_rules! println_flush {
     }
 }
 
-/// Call `eprint!` and automatically flush.
+/// Call `eprint!` and immediately flush.
 #[macro_export]
 macro_rules! eprint_flush {
     ( $fmt:literal $(, $val:expr )* $(,)?) => {
@@ -57,7 +57,7 @@ macro_rules! eprint_flush {
     }
 }
 
-/// Call `eprintln!` and automatically flush.
+/// Call `eprintln!` and immediately flush.
 #[macro_export]
 macro_rules! eprintln_flush {
     ( $fmt:literal $(, $val:expr )* $(,)?) => {
@@ -246,7 +246,7 @@ macro_rules! loop_call {
                 .map(|n| (*n as f64).log10().floor() as usize + 1)
                 .collect();
             let _tot_: usize = _Nvals_.iter().product();
-            let _NN_: Vec<usize>
+            let _strides_: Vec<usize>
                 = (1.._nvars_).rev()
                 .map(|k| _Nvals_[_nvars_ - k.._nvars_].iter().product())
                 .chain([1])
@@ -266,7 +266,7 @@ macro_rules! loop_call {
                         "[{:6.2}%] \r",
                         100.0 * (
                             (0.._nvars_)
-                                .map(|k| (Q[k] - last as usize) * _NN_[k])
+                                .map(|k| (Q[k] - last as usize) * _strides_[k])
                                 .sum::<usize>() as f64
                             + last as usize as f64
                         ) / _tot_ as f64,
@@ -284,21 +284,21 @@ macro_rules! loop_call {
             let _t0_: std::time::Instant = std::time::Instant::now();
             for Q in _input_idx_ {
                 if $printflag {
-                    print!("{}", _mk_outstr_(Q.clone(), false));
+                    eprint!("{}", _mk_outstr_(Q.clone(), false));
                     std::io::Write::flush(&mut std::io::stdout()).unwrap();
                 }
                 _outputs_.push($caller(Q.clone()));
             }
             let _dt_: std::time::Duration = std::time::Instant::now() - _t0_;
             if $printflag {
-                println!("{}", _mk_outstr_(_Nvals_.clone(), true));
+                eprintln!("{}", _mk_outstr_(_Nvals_.clone(), true));
                 std::io::Write::flush(&mut std::io::stdout()).unwrap();
-                println!(
+                eprintln!(
                     "{}total time elapsed: {:.3} s",
                     " ".repeat($lspace),
                     _dt_.as_secs_f32(),
                 );
-                println!(
+                eprintln!(
                     "{}average time per call: {:.3} s",
                     " ".repeat($lspace),
                     _dt_.as_secs_f32() / _tot_ as f32,
