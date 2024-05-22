@@ -252,7 +252,7 @@ macro_rules! loop_call {
                 .chain([1])
                 .collect();
 
-            let _mk_outstr_ = |Q: Vec<usize>, last: bool| -> String {
+            let _mk_outstr_ = |Q: &[usize], last: bool| -> String {
                 let mut outstr_items: Vec<String>
                     = Vec::with_capacity(_nvars_ + 3);
                 outstr_items.push(" ".repeat($lspace));
@@ -284,14 +284,14 @@ macro_rules! loop_call {
             let _t0_: std::time::Instant = std::time::Instant::now();
             for Q in _input_idx_ {
                 if $printflag {
-                    eprint!("{}", _mk_outstr_(Q.clone(), false));
+                    eprint!("{}", _mk_outstr_(&Q, false));
                     std::io::Write::flush(&mut std::io::stdout()).unwrap();
                 }
-                _outputs_.push($caller(Q.clone()));
+                _outputs_.push($caller(&Q));
             }
             let _dt_: std::time::Duration = std::time::Instant::now() - _t0_;
             if $printflag {
-                eprintln!("{}", _mk_outstr_(_Nvals_.clone(), true));
+                eprintln!("{}", _mk_outstr_(&_Nvals_, true));
                 std::io::Write::flush(&mut std::io::stdout()).unwrap();
                 eprintln!(
                     "{}total time elapsed: {:.3} s",
