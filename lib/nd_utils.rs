@@ -7,6 +7,7 @@ use ndarray::{
 };
 use crate::{
     utils::{
+        ExpVal,
         FExtremum,
     },
 };
@@ -264,4 +265,6 @@ impl_rotateindexaxis!(nd::Array4<T>);
 impl_rotateindexaxis!(nd::Array5<T>);
 impl_rotateindexaxis!(nd::Array6<T>);
 impl_rotateindexaxis!(nd::ArrayD<T>);
+
+impl nd::ScalarOperand for ExpVal { }
 
