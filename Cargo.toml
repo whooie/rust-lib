@@ -33,8 +33,12 @@ optional = true
 version = "0.3.0"
 optional = true
 
-[dependencies.plotters]
-version = "0.3.4"
+# [dependencies.plotters]
+# version = "0.3.4"
+# optional = true
+
+[dependencies.matplotlib]
+version = "0.2.0"
 optional = true
 
 # [dependencies.plotly]
@@ -80,7 +84,8 @@ path = "lib/lib.rs"
 config = [ "dep:serde", "dep:toml", "dep:serde_json", "dep:serde_yaml",]
 nd = [ ]
 ndarray-utils = [ "dep:serde", "dep:ndarray-npy",]
-plotting = [ "dep:plotters",]
+# plotting = [ "dep:plotters",]
+plotting = [ "dep:matplotlib",]
 # plotting-plotly = [ "dep:plotly",]
 pyo3-utils = [ "dep:pyo3",]
 math = [ "dep:rand", "dep:ndarray-linalg", "dep:rustfft", "dep:ndrustfft",]

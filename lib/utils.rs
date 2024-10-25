@@ -126,25 +126,26 @@ pub extern crate ndarray;
 /// axis is associated with the $`k`$-th input array.
 ///
 /// When calling this macro, the function `$caller` should take a single
-/// `Vec<usize>` of indices, which should be used in the function body to refer
+/// `&[usize]` of indices, which should be used in the function body to refer
 /// to input values in the sampling arrays, which in turn should be defined
-/// beforehand, outside the macro. Output arrays must be returned as `IxDyn`.
+/// beforehand, outside the macro. Output arrays are be returned as
+/// [`ndarray::ArrayD`].
 ///
 /// # Example
 /// ```
 /// # extern crate ndarray;
 /// # fn main() {
 /// use ndarray::{ Array1, Array3, ArrayD, array };
-/// use smorgasbord::{ loop_call };
+/// use whooie::loop_call;
 ///
 /// let var1: Array1<f64> = array![0.5, 1.0, 2.0];
 /// let var2: Array1<i32> = array![-1, 0, 1, 2];
 /// let var3: Array1<bool> = array![true, false];
 ///
 /// let mut caller
-///     = |Q: Vec<usize>| -> (f64, f64) {
-///         let val: f64 = var1[Q[0]].powi(var2[Q[1]]);
-///         if var3[Q[2]] {
+///     = |q: &[usize]| -> (f64, f64) {
+///         let val: f64 = var1[q[0]].powi(var2[q[1]]);
+///         if var3[q[2]] {
 ///             (val, 2.0 * val)
 ///         } else {
 ///             (-val, -2.0 * val)
@@ -860,7 +861,7 @@ macro_rules! value_str {
 /// [`value_str!`][crate::value_str] macro).
 ///
 /// ```
-/// # use smorgasbord::utils::ExpVal;
+/// # use whooie::utils::ExpVal;
 /// let val = ExpVal::new(0.123, 0.001);
 ///
 /// // default formatter is just a call to value_str!
